@@ -14,22 +14,17 @@ rm -rf $RDIR/toolchains/esp-tools/riscv-pk/build.log
 rm -rf $RDIR/toolchains/esp-tools/riscv-tests/build.log
 (
     pushd $RDIR/generators/constellation
-    if [ -d espresso ]
+    if [ -e espresso/.git ]
     then
 	git submodule deinit -f espresso
     fi
     popd
 )
 (
-    pushd $RDIR/tools/cde
-    git config --local status.showUntrackedFiles no
-    popd
-)
-(
     if [ -d $RDIR/generators/cva6/src/main/resources/cva6/vsrc ]
     then
         pushd $RDIR/generators/cva6/src/main/resources/cva6/vsrc
-        if [ -d cva6 ]
+        if [ -e cva6/.git ]
         then
 	    git submodule deinit -f cva6
         fi

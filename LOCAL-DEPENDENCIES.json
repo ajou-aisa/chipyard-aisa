@@ -1,0 +1,380 @@
+[
+  {
+    "path": "fpga/fpga-shells",
+    "url": "https://github.com/chipsalliance/rocket-chip-fpga-shells.git",
+    "commit": "d650f81c0728f3108719d37396c2a651a7463520",
+    "available": true
+  },
+  {
+    "path": "generators/bar-fetchers",
+    "url": "https://github.com/ucb-bar/bar-fetchers.git",
+    "commit": "3a33d818aefe5444aa27fc1557008f747538d2cc",
+    "available": true
+  },
+  {
+    "path": "generators/boom",
+    "url": "https://github.com/riscv-boom/riscv-boom.git",
+    "commit": "1a153d4974977a2d5f8baa9b4de51b3337d230fe",
+    "available": true
+  },
+  {
+    "path": "generators/constellation",
+    "url": "https://github.com/ucb-bar/constellation.git",
+    "commit": "8184e0e7e32ff11dce344c449158aa7551e164e0",
+    "available": true
+  },
+  {
+    "path": "generators/cva6",
+    "url": "https://github.com/ucb-bar/cva6-wrapper.git",
+    "commit": "46323fcd7407544c751b353f52e356eb8f33e9d1",
+    "available": true
+  },
+  {
+    "path": "generators/fft-generator",
+    "url": "https://github.com/ucb-bar/FFTGenerator.git",
+    "commit": "f598d0c359c896e7853c8ef01c39ebecdd48b344",
+    "available": true
+  },
+  {
+    "path": "generators/hwacha",
+    "url": "https://github.com/ucb-bar/hwacha.git",
+    "commit": "d01ca1e7f8a3ba3f419509273dfef00e41095f6a",
+    "available": true
+  },
+  {
+    "path": "generators/ibex",
+    "url": "https://github.com/ucb-bar/ibex-wrapper",
+    "commit": "66ec6e56ed69df4e4af5383128cf21adf88b08fc",
+    "available": true
+  },
+  {
+    "path": "generators/icenet",
+    "url": "https://github.com/firesim/icenet.git",
+    "commit": "68b4c7f30f0119fe5cfab7ea99fb6927a563e112",
+    "available": true
+  },
+  {
+    "path": "generators/mempress",
+    "url": "https://github.com/ucb-bar/mempress.git",
+    "commit": "c3d4901ab0f3c28bfd4101ffd62f707a86fc377e",
+    "available": true
+  },
+  {
+    "path": "generators/nvdla",
+    "url": "https://github.com/ucb-bar/nvdla-wrapper.git",
+    "commit": "730fad4360e67b14b1a4656ac58aaa40cfd4fe6b",
+    "available": true
+  },
+  {
+    "path": "generators/riscv-sodor",
+    "url": "https://github.com/ucb-bar/riscv-sodor.git",
+    "commit": "c1c809ebd5c9a76cd60d8c3169cea4bf4b2fa8fd",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip",
+    "url": "https://github.com/chipsalliance/rocket-chip.git",
+    "commit": "47f7b7144727f0340d511d35b9f6c7a91b2a276f",
+    "available": true
+  },
+  {
+    "path": "generators/sha3",
+    "url": "https://github.com/ucb-bar/sha3.git",
+    "commit": "eb3822a2bcc33d5b36456b537681da626ab4b2af",
+    "available": true
+  },
+  {
+    "path": "generators/shuttle",
+    "url": "https://github.com/ucb-bar/shuttle.git",
+    "commit": "3c15591a9ee237bb1251e5362de22ad19f64ba07",
+    "available": true
+  },
+  {
+    "path": "generators/sifive-blocks",
+    "url": "https://github.com/chipsalliance/rocket-chip-blocks.git",
+    "commit": "abf129a33bf3d73dbc017f34862038b6e722b8ed",
+    "available": true
+  },
+  {
+    "path": "generators/sifive-cache",
+    "url": "https://github.com/chipsalliance/rocket-chip-inclusive-cache.git",
+    "commit": "02e002b324c0e6316234045fa739fdb9d716170d",
+    "available": true
+  },
+  {
+    "path": "generators/testchipip",
+    "url": "https://github.com/ucb-bar/testchipip.git",
+    "commit": "128ccb09f0122651cadff4451cf30cf591636a70",
+    "available": true
+  },
+  {
+    "path": "sims/firesim",
+    "url": "https://github.com/firesim/firesim.git",
+    "commit": "3be1d12a6f44a65d3e55d79e76eaeba66e5577a5",
+    "available": false
+  },
+  {
+    "path": "software/coremark",
+    "url": "https://github.com/ucb-bar/coremark-workload.git",
+    "commit": "cf8b8f7d82e085b3ecb31865fa40fb3dd62554f2",
+    "available": false
+  },
+  {
+    "path": "software/embench/embench-iot",
+    "url": "https://github.com/embench/embench-iot.git",
+    "commit": "d9b30cdf805133bef9db5f7ecf84ae1ce8124291",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal",
+    "url": "https://github.com/ajou-aisa/firemarshal-aisa.git",
+    "commit": "f553a22b2831a37868e921afa98cf30a6c633a61",
+    "available": true
+  },
+  {
+    "path": "software/nvdla-workload",
+    "url": "https://github.com/ucb-bar/nvdla-workload.git",
+    "commit": "30290c3ed8014577fa2ad234fa1b731a082299fb",
+    "available": false
+  },
+  {
+    "path": "software/spec2017",
+    "url": "https://github.com/ucb-bar/spec2017-workload.git",
+    "commit": "83e33110472c47aaa762257ed7c053ff1278834c",
+    "available": false
+  },
+  {
+    "path": "toolchains/esp-tools/esp-tools-feedstock",
+    "url": "https://github.com/ucb-bar/esp-tools-feedstock.git",
+    "commit": "76a16c8ddbf3a8af420e1551192d58c4d41e7f66",
+    "available": false
+  },
+  {
+    "path": "toolchains/esp-tools/riscv-isa-sim",
+    "url": "https://github.com/ucb-bar/esp-isa-sim.git",
+    "commit": "34741e07bc6b56f1762ce579537948d58e28cd5a",
+    "available": false
+  },
+  {
+    "path": "toolchains/esp-tools/riscv-pk",
+    "url": "https://github.com/riscv-software-src/riscv-pk.git",
+    "commit": "e8e6b3aaee44d43b48164fbd377864c3a682dbd3",
+    "available": false
+  },
+  {
+    "path": "toolchains/esp-tools/riscv-tests",
+    "url": "https://github.com/ucb-bar/esp-tests.git",
+    "commit": "7c3dfd3205fa90104db06346e797a8eeea149207",
+    "available": false
+  },
+  {
+    "path": "toolchains/libgloss",
+    "url": "https://github.com/ucb-bar/libgloss-htif.git",
+    "commit": "0ecdf7fa08c9e40f9d60903b8189511beb8555ab",
+    "available": true
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-isa-sim",
+    "url": "https://github.com/riscv-software-src/riscv-isa-sim.git",
+    "commit": "fcbdbe7946079650d0e656fa3d353e3f652d471f",
+    "available": true
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-openocd",
+    "url": "https://github.com/riscv/riscv-openocd.git",
+    "commit": "cbb15587dc782ac8ade7ae252e7b760cfba4a178",
+    "available": false
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-pk",
+    "url": "https://github.com/riscv-software-src/riscv-pk.git",
+    "commit": "e8e6b3aaee44d43b48164fbd377864c3a682dbd3",
+    "available": true
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-tests",
+    "url": "https://github.com/riscv-software-src/riscv-tests.git",
+    "commit": "a6ab6ae6008ffc2ea907ea9f6d2b8379583e7d56",
+    "available": true
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-tools-feedstock",
+    "url": "https://github.com/ucb-bar/riscv-tools-feedstock.git",
+    "commit": "917b56ef1a78871be22283ecdb01658ac11cbe61",
+    "available": false
+  },
+  {
+    "path": "tools/DRAMSim2",
+    "url": "https://github.com/firesim/DRAMSim2.git",
+    "commit": "44322e2f935d7dac83b7adf8dd270b41a54c6acb",
+    "available": true
+  },
+  {
+    "path": "tools/axe",
+    "url": "https://github.com/CTSRD-CHERI/axe.git",
+    "commit": "4a7cf86960425fbf0b6224865b745ff511dc5742",
+    "available": true
+  },
+  {
+    "path": "tools/barstools",
+    "url": "https://github.com/ucb-bar/barstools.git",
+    "commit": "fe81afec14634316606a9dd10628c220d53bd256",
+    "available": true
+  },
+  {
+    "path": "tools/cde",
+    "url": "https://github.com/chipsalliance/cde.git",
+    "commit": "384c06b8d45c8184ca2f3fba2f8e78f79d2c1b51",
+    "available": true
+  },
+  {
+    "path": "tools/dromajo/dromajo-src",
+    "url": "https://github.com/riscv-boom/dromajo.git",
+    "commit": "09fbef4565429f641a7eb93f190ad0e45e11d7f8",
+    "available": true
+  },
+  {
+    "path": "tools/dsptools",
+    "url": "https://github.com/ucb-bar/dsptools.git",
+    "commit": "5b1e733596a39f6960bf9a7c1897d82912372766",
+    "available": true
+  },
+  {
+    "path": "tools/rocket-dsp-utils",
+    "url": "https://github.com/ucb-bar/rocket-dsp-utils",
+    "commit": "fe641d1c346d5605f95d235e8c75d0baac7fa6d8",
+    "available": true
+  },
+  {
+    "path": "tools/torture",
+    "url": "https://github.com/ucb-bar/riscv-torture.git",
+    "commit": "b2b66a66d51b360e0ae95017774d03377c78c574",
+    "available": true
+  },
+  {
+    "path": "vlsi/hammer-mentor-plugins",
+    "url": "https://github.com/ucb-bar/hammer-mentor-plugins.git",
+    "commit": "eca060af456043ded569bbcc8bea49c03bff6911",
+    "available": false
+  },
+  {
+    "path": "generators/constellation/espresso",
+    "url": "https://github.com/chipsalliance/espresso.git",
+    "commit": "2cc477880bd99a40f257155a676fc61fd53e0d9e",
+    "available": false
+  },
+  {
+    "path": "generators/constellation/src/main/resources/csrc/netrace",
+    "url": "https://github.com/booksim/netrace.git",
+    "commit": "bf30293e05da0ff7057be209deb7dc0317f08b09",
+    "available": true
+  },
+  {
+    "path": "generators/cva6/src/main/resources/cva6/vsrc/cva6",
+    "url": "https://github.com/openhwgroup/cva6.git",
+    "commit": "6000e32b4181304901adc4c8d72870ebc94473a5",
+    "available": false
+  },
+  {
+    "path": "generators/ibex/src/main/resources/vsrc/ibex",
+    "url": "https://github.com/lowRISC/ibex.git",
+    "commit": "48f11c673348908c37d3eaa9bd1cd0a5b5c69253",
+    "available": true
+  },
+  {
+    "path": "generators/nvdla/src/main/resources/hw",
+    "url": "https://github.com/nvdla/hw.git",
+    "commit": "8e06b1b9d85aab65b40d43d08eec5ea4681ff715",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/cde",
+    "url": "https://github.com/chipsalliance/cde.git",
+    "commit": "384c06b8d45c8184ca2f3fba2f8e78f79d2c1b51",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/hardfloat",
+    "url": "https://github.com/ucb-bar/berkeley-hardfloat.git",
+    "commit": "72709416c4cf8847aa8feeb58aec5ea875267e67",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/torture",
+    "url": "https://github.com/ucb-bar/riscv-torture.git",
+    "commit": "99d8b2b441ecaa18b852505bb7718ee04e2753f5",
+    "available": true
+  },
+  {
+    "path": "generators/sha3/software/linux",
+    "url": "https://github.com/firesim/linux.git",
+    "commit": "280191c0a6693bce79bec8ef235f58d5f3de4a47",
+    "available": false
+  },
+  {
+    "path": "software/firemarshal/boards/default/distros/br/buildroot",
+    "url": "https://github.com/buildroot/buildroot.git",
+    "commit": "d48a8beb39275a479185ab9b3232cd15dcfb87ab",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal/boards/default/firmware/opensbi",
+    "url": "https://github.com/ajou-aisa/opensbi-aisa.git",
+    "commit": "5ccebf0a7ec79d0bbef36d6dcdc2717f25d40767",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal/boards/default/linux",
+    "url": "https://github.com/ajou-aisa/linux-aisa.git",
+    "commit": "71bece669db27e8c5bf1b6e25780bab194d23103",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal/boards/firechip/drivers/iceblk-driver",
+    "url": "https://github.com/firesim/iceblk-driver.git",
+    "commit": "4e6f183337b27aa5be99dc4873ea507572aceb9f",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal/boards/firechip/drivers/icenet-driver",
+    "url": "https://github.com/firesim/icenet-driver.git",
+    "commit": "ac703940e68b54e196414b5d1c1533bda4e88cb5",
+    "available": true
+  },
+  {
+    "path": "software/firemarshal/wlutil/busybox",
+    "url": "https://github.com/mirror/busybox.git",
+    "commit": "70f77e4617e06077231b8b63c3fb3406d7f8865d",
+    "available": true
+  },
+  {
+    "path": "toolchains/riscv-tools/riscv-tests/env",
+    "url": "https://github.com/riscv/riscv-test-env.git",
+    "commit": "0666378f353599d01fc48562b431b1dd049faab5",
+    "available": true
+  },
+  {
+    "path": "tools/torture/env",
+    "url": "https://github.com/riscv/riscv-test-env.git",
+    "commit": "1b76fd1f1c63dfe4cea93f426434a7384d2bf801",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/hardfloat/berkeley-softfloat-3",
+    "url": "https://github.com/ucb-bar/berkeley-softfloat-3.git",
+    "commit": "b64af41c3276f97f0e181920400ee056b9c88037",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/hardfloat/berkeley-testfloat-3",
+    "url": "https://github.com/ucb-bar/berkeley-testfloat-3.git",
+    "commit": "06b20075dd3c1a5d0dd007a93643282832221612",
+    "available": true
+  },
+  {
+    "path": "generators/rocket-chip/torture/env",
+    "url": "https://github.com/riscv/riscv-test-env.git",
+    "commit": "ce70afbf50a203be04bc326326cfa75831fe7f5d",
+    "available": true
+  }
+]

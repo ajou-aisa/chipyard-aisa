@@ -26,6 +26,13 @@ module_prepare() ( # <submodule> [ignored-submodule..]
 
     dir="${SRCDIR}/${name}"
     echo "=>  Starting ${name} build"
+    if [ -d "${dir}" ] && [ ! -e "${dir}/.git" ]; then
+        if [ -n "$(ls -A "${dir}")" ]; then
+            return
+        fi
+        echo "Missing optional dependency: ${dir}. See LOCAL-DEPENDENCIES.json." >&2
+        return 1
+    fi
     echo "==>  Initializing ${name} submodule"
     if [ $# -gt 0 ] ; then
 	(set -x; git submodule update --init "${dir}")

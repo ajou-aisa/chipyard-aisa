@@ -88,61 +88,12 @@ fi
 
 cd "$RDIR"
 
-(
-    # Blocklist of submodules to initially skip:
-    # - Toolchain submodules
-    # - Generators with huge submodules (e.g., linux sources)
-    # - FireSim until explicitly requested
-    # - Hammer tool plugins
-    git_submodule_exclude() {
-        # Call the given subcommand (shell function) on each submodule
-        # path to temporarily exclude during the recursive update
-        for name in \
-            toolchains/*-tools/* \
-            toolchains/libgloss \
-            generators/sha3 \
-            generators/gemmini \
-            sims/firesim \
-            software/nvdla-workload \
-            software/coremark \
-            software/firemarshal \
-            software/spec2017 \
-            vlsi/hammer-mentor-plugins
-        do
-            "$1" "${name%/}"
-        done
-    }
-
-    _skip() { git config --local "submodule.${1}.update" none ; }
-    _unskip() { git config --local --unset-all "submodule.${1}.update" || : ; }
-
-    trap 'git_submodule_exclude _unskip' EXIT INT TERM
-    (
-        set -x
-        git_submodule_exclude _skip
-        git submodule update --init --recursive #--jobs 8
-    )
-)
-
-(
-    # Non-recursive clone to exclude riscv-linux
-    git submodule update --init generators/sha3
-
-    # Non-recursive clone to exclude gemmini-software
-    git submodule update --init generators/gemmini
-    git -C generators/gemmini/ submodule update --init --recursive software/gemmini-rocc-tests
-
-    # Minimal non-recursive clone to initialize sbt dependencies
-    git submodule update --init sims/firesim
-    git config --local submodule.sims/firesim.update none
-
-    # Only shallow clone needed for basic SW tests
-    git submodule update --init software/firemarshal
-)
+# All other available dependencies are ordinary source files.
+git submodule update --init generators/gemmini
 
 # Configure firemarshal to know where our firesim installation is
 if [ ! -f ./software/firemarshal/marshal-config.yaml ]; then
-  echo "firesim-dir: '../../sims/firesim/'" > ./software/firemarshal/marshal-config.yaml
+  echo "firesim-dir: '../../../../'" > ./software/firemarshal/marshal-config.yaml
 fi
 
 cat << EOT >> env.sh

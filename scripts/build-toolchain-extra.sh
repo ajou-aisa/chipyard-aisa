@@ -92,7 +92,6 @@ module_all riscv-tests --prefix="${RISCV}/riscv${XLEN}-unknown-elf" --with-xlen=
 echo '==> Installing espresso logic minimizer'
 (
     cd $RDIR
-    git submodule update --init --checkout generators/constellation
     cd generators/constellation
     scripts/install-espresso.sh $RISCV
 )
@@ -107,13 +106,11 @@ if [ $TOOLCHAIN == "riscv-tools" ]; then
     echo '==> Installing gemmini spike extensions'
     git submodule update --init generators/gemmini
     cd generators/gemmini
-    git submodule update --init software/libgemmini
     make -C $RDIR/generators/gemmini/software/libgemmini install
 fi
 
 echo '==>  Installing DRAMSim2 Shared Library'
 cd $RDIR
-git submodule update --init tools/DRAMSim2
 cd tools/DRAMSim2
 make libdramsim.so
 cp libdramsim.so $RISCV/lib/

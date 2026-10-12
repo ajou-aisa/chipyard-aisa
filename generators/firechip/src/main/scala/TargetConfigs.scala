@@ -284,6 +284,22 @@ class FireSimLeanGemminiPrintfRocketConfig extends Config(
   new WithFireSimConfigTweaks ++
   new chipyard.LeanGemminiPrintfRocketConfig)
 
+//******************************************************************
+// Gemmini multicore config, base off chipyard's GemminiRocketConfig
+//******************************************************************
+
+class FireSimQuadRocketSingleGemminiConfig extends Config(
+  new chipyard.config.WithMultiRoCC ++
+  new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(3) ++
+  new FireSimLeanGemminiRocketConfig)
+
+class FireSimOctaRocketSingleGemminiConfig extends Config(
+  new chipyard.config.WithMultiRoCC ++
+  new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(7) ++
+  new FireSimLeanGemminiRocketConfig)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************
