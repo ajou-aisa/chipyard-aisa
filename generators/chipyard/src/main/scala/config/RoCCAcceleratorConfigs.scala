@@ -56,3 +56,17 @@ class HwachaLargeBoomConfig extends Config(
   new boom.common.WithNLargeBooms(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)
+
+// ============================================================
+// PoTal A8W8-D16 / WS / Sat32 ACC
+//
+// W3-1 configuration bring-up.
+// PoTal SCU writeback is not enabled yet.
+// ============================================================
+
+class PoTalSat32GemminiRocketConfig extends Config(
+  new gemmini.PoTalSat32GemminiConfig ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig
+)
