@@ -1,4 +1,4 @@
 [submodule "generators/gemmini"]
 path = generators/gemmini
-url = https://github.com/ajou-aisa/llama.cpp-gemmini.git
+url = https://github.com/ajou-aisa/gemmini-aisa.git
 branch = aisa-customizations

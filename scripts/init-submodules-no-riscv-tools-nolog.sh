@@ -89,7 +89,7 @@ fi
 cd "$RDIR"
 
 # All other available dependencies are ordinary source files.
-git submodule update --init generators/gemmini
+git submodule update --init --recursive generators/gemmini
 
 # Configure firemarshal to know where our firesim installation is
 if [ ! -f ./software/firemarshal/marshal-config.yaml ]; then

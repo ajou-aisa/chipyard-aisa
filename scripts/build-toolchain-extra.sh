@@ -104,7 +104,7 @@ CC= CXX= SRCDIR="$(pwd)/toolchains" module_all libgloss --prefix="${RISCV}/riscv
 cd $RDIR
 if [ $TOOLCHAIN == "riscv-tools" ]; then
     echo '==> Installing gemmini spike extensions'
-    git submodule update --init generators/gemmini
+    git submodule update --init --recursive generators/gemmini
     cd generators/gemmini
     make -C $RDIR/generators/gemmini/software/libgemmini install
 fi
