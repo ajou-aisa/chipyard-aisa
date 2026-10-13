@@ -70,3 +70,17 @@ class PoTalSat32GemminiRocketConfig extends Config(
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig
 )
+
+class PoTalSat32D32GemminiRocketConfig extends Config(
+  new gemmini.PoTalSat32D32GemminiConfig ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig
+)
+
+class PoTalSat32D64GemminiRocketConfig extends Config(
+  new gemmini.PoTalSat32D64GemminiConfig ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig
+)
