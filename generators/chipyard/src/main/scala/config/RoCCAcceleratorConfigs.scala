@@ -65,21 +65,21 @@ class HwachaLargeBoomConfig extends Config(
 // ============================================================
 
 class PoTalSat32GemminiRocketConfig extends Config(
-  new gemmini.PoTalSat32GemminiConfig ++
+  new potal.PoTalSat32GemminiConfig ++
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig
 )
 
 class PoTalSat32D32GemminiRocketConfig extends Config(
-  new gemmini.PoTalSat32D32GemminiConfig ++
+  new potal.PoTalSat32D32GemminiConfig ++
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig
 )
 
 class PoTalSat32D64GemminiRocketConfig extends Config(
-  new gemmini.PoTalSat32D64GemminiConfig ++
+  new potal.PoTalSat32D64GemminiConfig ++
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig

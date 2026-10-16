@@ -152,7 +152,7 @@ lazy val chipyard = (project in file("generators/chipyard"))
   .dependsOn(testchipip, rocketchip, boom, hwacha, sifive_blocks, sifive_cache, iocell,
     sha3, // On separate line to allow for cleaner tutorial-setup patches
     dsptools, `rocket-dsp-utils`,
-    gemmini, icenet, tracegen, cva6, nvdla, sodor, ibex, fft_generator,
+    gemmini, potal, icenet, tracegen, cva6, nvdla, sodor, ibex, fft_generator,
     constellation, mempress, barf, shuttle)
   .settings(libraryDependencies ++= rocketLibDeps.value)
   .settings(
@@ -234,6 +234,35 @@ lazy val gemmini = (project in file("generators/gemmini"))
   .settings(libraryDependencies ++= rocketLibDeps.value)
   .settings(chiselTestSettings)
   .settings(commonSettings)
+
+lazy val potal = (project in file("generators/potal"))
+  .dependsOn(rocketchip)
+  .settings(libraryDependencies ++= rocketLibDeps.value)
+  .settings(chiselTestSettings)
+  .settings(commonSettings)
+  .settings(
+    Compile / scalaSource :=
+      baseDirectory.value / "src/main/scala/potal",
+    Test / scalaSource :=
+      baseDirectory.value / "src/test/scala/potal",
+    Test / unmanagedSources := {
+      val dir = (Test / scalaSource).value
+      Seq(
+        "PoTalConfigSpec.scala",
+        "PoTalSCUSpec.scala",
+        "PoTalScaleMemorySpec.scala",
+        "PoTalScaleBlockSpec.scala",
+        "PoTalScaleCommandIngressSpec.scala",
+        "PoTalAccPipeSpec.scala",
+        "PoTalAccumulatorRMWSpec.scala",
+        "PoTalPreloadReservationGateSpec.scala",
+        "PoTalAccWriteRouterSpec.scala",
+        "PoTalWritebackSpec.scala",
+        "PoTalWritebackRMWSpec.scala",
+        "PoTalDrainHandshakeSpec.scala"
+      ).map(name => dir / name)
+    }
+  )
 
 lazy val nvdla = (project in file("generators/nvdla"))
   .dependsOn(rocketchip)
