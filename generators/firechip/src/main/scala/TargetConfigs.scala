@@ -300,6 +300,24 @@ class FireSimOctaRocketSingleGemminiConfig extends Config(
   new freechips.rocketchip.subsystem.WithNBigCores(7) ++
   new FireSimLeanGemminiRocketConfig)
 
+// ***********************************************
+// PoTal A8W8 / DIM16 / WS / Sat32
+// ***********************************************
+class FireSimPoTalD16RocketConfig extends Config(
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.PoTalSat32GemminiRocketConfig
+)
+
+// Four Rocket cores, one PoTAL accelerator on hard 0
+class FireSimQuadRocketSinglePoTalD16Config extends Config(
+  new chipyard.config.WithMultiRoCC ++
+  new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(3) ++
+  new FireSimPoTalD16RocketConfig
+)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************
@@ -360,3 +378,5 @@ class FireSimLeanGemminiRocketMMIOOnlyConfig extends Config(
   new WithDefaultMemModel ++
   new WithFireSimConfigTweaks ++
   new chipyard.LeanGemminiRocketConfig)
+
+

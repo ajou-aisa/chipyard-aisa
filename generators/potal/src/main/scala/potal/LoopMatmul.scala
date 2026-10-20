@@ -755,6 +755,9 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
   // Number of physical DIM-wide K passes per scale block.
   val potalPassesPerBlock = UInt(16.W)
 
+  val potalPairedAcc = Bool()
+  val potalPairedResidual = Bool()
+
   val a_ex_spad_id = UInt(2.W)
   val b_ex_spad_id = UInt(2.W)
   val configured = Bool()
@@ -787,6 +790,9 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
     potalScaleBase := 0.U
     potalScaleGeneration := 0.U
     potalPassesPerBlock := 1.U
+
+    potalPairedAcc := false.B
+    potalPairedResidual := false.B
 
     running := false.B
 
@@ -1033,6 +1039,23 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
         // rs1[44:37] : scaleGeneration
         // rs1[60:45] : passesPerBlock 
         val potalEnable = cmd.bits.cmd.rs1(20)
+
+        // LOOP_WS
+        val pairedAcc = cmd.bits.cmd.rs1(61)
+        val pairedResidual = cmd.bits.cmd.rs1(62)
+
+        loop_being_configured.potalPairedAcc := potalEnable && pairedAcc
+
+        loop_being_configured.potalPairedResidual := potalEnable && pairedAcc && pairedResidual
+
+        when(pairedAcc || pairedResidual) {
+          assert(potalEnable, "PoTal paired ACC requires PoTal mode")
+          assert(pairedAcc, "PoTal residual path requires paired ACC mode")
+          assert(loop_being_configured.d_dram_addr === 0.U, "PoTal paired ACC probe does not support D")
+          assert((loop_being_configured.max_i * loop_being_configured.max_j * block_size.U) <= (max_acc_addr / 2).U,
+                  "PoTal paired ACC exceeds one bank")
+        }        
+
         val scaleBase = cmd.bits.cmd.rs1(36, 21)
         val passesPerBlock = cmd.bits.cmd.rs1(60, 45)
 
@@ -1135,7 +1158,10 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ex.io.req.bits.b_addr_end := Mux(loop_requesting_ex.b_ex_spad_id === 0.U, loop_requesting_ex.b_addr_end, (loop_requesting_ex.b_ex_spad_id) * (max_addr / concurrent_loops).U) 
   ex.io.req.bits.a_tranpose := loop_requesting_ex.a_transpose
   ex.io.req.bits.b_tranpose := loop_requesting_ex.b_transpose
-  ex.io.req.bits.c_addr_start := ex_c_addr_start
+
+  val pairedAccBase = Mux(loop_requesting_ex.potalPairedResidual, (max_acc_addr / 2).U, 0.U)
+  ex.io.req.bits.c_addr_start := Mux(loop_requesting_ex.potalPairedAcc, pairedAccBase, ex_c_addr_start)
+
   ex.io.req.bits.loop_id := loop_requesting_ex_id
   ex.io.req.bits.skip := is_resadd
 
@@ -1146,7 +1172,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     loop_requesting_ex.running := true.B
     loop_requesting_ex.ex_started := true.B
 
-    when (loop_requesting_ex.c_dram_addr =/= 0.U) {
+    when (loop_requesting_ex.c_dram_addr =/= 0.U &&
+          !loop_requesting_ex.potalPairedAcc) {
       ex_c_addr_start := floorAdd(ex_c_addr_start, (max_acc_addr / concurrent_loops).U, max_acc_addr.U)
     }
   }
@@ -1160,7 +1187,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldD.io.req.bits.dram_addr := loop_requesting_ldD.d_dram_addr
   ldD.io.req.bits.dram_stride := loop_requesting_ldD.d_dram_stride
   ldD.io.req.bits.low_d := loop_requesting_ldD.low_d
-  ldD.io.req.bits.addr_start := ld_d_addr_start
+  ldD.io.req.bits.addr_start := Mux(loop_requesting_ldD.potalPairedAcc, Mux(loop_requesting_ldD.potalPairedResidual, (max_acc_addr/2).U, 0.U), ld_d_addr_start)
   ldD.io.req.bits.loop_id := loop_requesting_ldD_id
 
   ldD.io.req.valid := !loop_requesting_ldD.ldd_started && loop_requesting_ldD.configured
@@ -1169,7 +1196,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     loop_requesting_ldD.running := true.B
     loop_requesting_ldD.ldd_started := true.B
 
-    when (loop_requesting_ldD.c_dram_addr =/= 0.U) {
+    when (loop_requesting_ldD.c_dram_addr =/= 0.U &&
+          !loop_requesting_ldD.potalPairedAcc) {
       ld_d_addr_start := floorAdd(ld_d_addr_start, (max_acc_addr / concurrent_loops).U, max_acc_addr.U)
     }
   }
@@ -1185,7 +1213,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   stC.io.req.bits.dram_stride := loop_requesting_st.c_dram_stride
   stC.io.req.bits.full_c := loop_requesting_st.full_c
   stC.io.req.bits.act := loop_requesting_st.act
-  stC.io.req.bits.addr_start := st_c_addr_start
+  stC.io.req.bits.addr_start := Mux(loop_requesting_st.potalPairedAcc, Mux(loop_requesting_st.potalPairedResidual, (max_acc_addr / 2).U, 0.U), st_c_addr_start)
   stC.io.req.bits.loop_id := loop_requesting_st_id
   stC.io.req.bits.is_resadd := is_resadd
 
@@ -1196,7 +1224,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     loop_requesting_st.running := true.B
     loop_requesting_st.st_started := true.B
 
-    when (loop_requesting_st.c_dram_addr =/= 0.U) {
+    when (loop_requesting_st.c_dram_addr =/= 0.U &&
+          !loop_requesting_st.potalPairedAcc) {
       st_c_addr_start := floorAdd(st_c_addr_start, (max_acc_addr / concurrent_loops).U, max_acc_addr.U)
     }
   }
