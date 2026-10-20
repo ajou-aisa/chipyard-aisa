@@ -55,6 +55,8 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     // Unlike busy, this is true only when every reservation-station entry has been retired.
     val drained = Output(Bool())
+    val potalIndexDescriptor = Input(new PoTalIndexConfig)
+    val potalIndexConfigured = Input(Bool())
 
     val counter = new CounterEventIO()
   })
@@ -220,11 +222,25 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     op1.valid := funct === PRELOAD_CMD || funct_is_compute
     op1.bits.start := cmd.rs1.asTypeOf(local_addr_t)
+
     when (funct === PRELOAD_CMD) {
       // TODO check b_transpose here iff WS mode is enabled
+      val indexed =io.alloc.bits.potal.valid && io.alloc.bits.potal.indexedWeight 
       val preload_rows = cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
-      op1.bits.end := op1.bits.start + preload_rows
-      op1.bits.wraps_around := op1.bits.start.add_with_overflow(preload_rows)._2
+
+      val originalKTiles = (io.potalIndexedDescriptor.sourceKRows +& (block_rows - 1).U) >> log2Ceil(block_rows)
+      val residentRoes = originalKTiles * io.potalIndexedDescriptor.jTiles * block_rows.U
+
+      when (indexed) {
+        assert(io.potalIndexedConfigured, "Indexed preload without B descriptor")
+        
+        op1.bits.start := LocalAddr.cast_to_sp_addr(local_addr_t, io.potalIndexedDecriptor.bBase)
+      }
+      
+      val hazardRows = Mux(indexed, residentRows, preloadRows)
+
+      op1.bits.end := op1.bits.start + hazardRows
+      op1.bits.wraps_around := op1.bits.start.add_with_overflow(hazardRows)._2
     }.otherwise {
       val rows = cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
       val cols = cmd.rs1(32 + log2Up(block_cols + 1) - 1, 32)

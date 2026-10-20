@@ -98,7 +98,9 @@ case class GemminiArrayConfig[T <: Data : Arithmetic, U <: Data, V <: Data](
                                                                               
                                                                              // PoTal: saturating INT32 accumulator RMW
                                                                              enablePoTalSat32Acc: Boolean = false,
-                                      
+                                                                             // Maximum logical K tiles represented by the index table
+                                                                             potalIndexWindowKTiles: Int = 0,                                      
+
                                                                              // Reserved for W3-2: scale-aware SCU writeback
                                                                              enablePoTalWriteback: Boolean = false
                                                        ) {
@@ -195,6 +197,25 @@ case class GemminiArrayConfig[T <: Data : Arithmetic, U <: Data, V <: Data](
   val LOG2_DIM        = log2Up(DIM)
   val LOG2_DIM_COUNT  = log2Up(DIM + 1)
   require(DIM >= 2, "the systolic array must have DIM of at least 2")
+
+  // Physical scratchpad geometry
+  val potalSpRows: Int = sp_banks * sp_bank_entries
+
+  // Physical index-table capacity.
+  // Non-PoTal configurations retain a harmless minimum
+  // because the current ExecuteController declares the table.
+  val potalIndexEntries: Int =
+    if (enablePoTalSat32Acc) {
+      require(potalIndexWindowKTiles > 0)
+
+      val entries = DIM.toLong * potalIndexWindowKTiles.toLong
+
+      // Current INDEX_CONFIG/WRITE protocol uses 16-bit counts.
+      require(entries <= 65535L)
+      entries.toInt
+    } else {
+      DIM
+    }
 
   //==========================================================================
   // cisc-gemmini miscellaneous constants (some redundant with above)

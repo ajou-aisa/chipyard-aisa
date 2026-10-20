@@ -9,6 +9,7 @@ object PoTalProtocol {
   // scaleBlockK = config.DIM * passesPerBlock
 
   val ScaleEntries = 256
+
   val GenerationWidth = 8
 
   val WorkEntries = 128
@@ -56,5 +57,14 @@ class PoTalCommandMetadata extends Bundle {
   // not scale selection.
   val firstContribution = Bool()
   val lastContribution = Bool()
+
+  // Indexed Shared Weight
+  val indexedWeight = Bool()
+
+  // Residual logical K tile index
+  val indexedKTile = UInt(16.W)
+
+  // Residual output N tile index
+  val indexedJTile = UInt(16.W)
 }
 

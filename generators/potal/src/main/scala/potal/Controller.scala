@@ -97,7 +97,11 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val potalIngressOpt =
     if (enablePoTalSat32Acc) {
       Some(withClock(gated_clock) {
-        Module(new PoTalScaleCommandIngress(DIM))
+        Module(new PoTalScaleCommandIngress(
+          dim = DIM,
+          indexEntries = potalIndexEntries,
+          spRows = potalSpRows
+        ))
       })
     } else {
       None
@@ -228,7 +232,9 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val isPoTalControl =
     rawFunct === POTAL_SCALE_WRITE ||
     rawFunct === POTAL_SCALE_RELEASE ||
-    rawFunct === POTAL_FENCE
+    rawFunct === POTAL_FENCE ||
+    rawFunct === POTAL_INDEX_WRITE ||
+    rawFunct === POTALINDEX_CONFIG
 
   val gemminiRawCmd = Wire(Decoupled(new GemminiCmd(reservation_station_entries)))
 
@@ -315,6 +321,25 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val load_controller = withClock (gated_clock) { Module(new LoadController(outer.config, coreMaxAddrBits, local_addr_t)) }
   val store_controller = withClock (gated_clock) { Module(new StoreController(outer.config, coreMaxAddrBits, local_addr_t)) }
   val ex_controller = withClock (gated_clock) { Module(new ExecuteController(xLen, tagWidth, outer.config)) }
+
+  // Index Table and Shared B Descriptor
+  potalIngressOpt match {
+    case Some(ingress) =>
+      ex_controller.io.potalIndexWrite := ingress.io.indexWrite
+      ex_controller.io.potalIndexConfig := ingress.io.indexConfigWrite
+
+      reservation_station.io.potalIndexDescriptor := ingress.io.indexDescriptor
+      reservation_station.io.potalIndexConfigured := ingress.io.indexConfigured
+
+    case None =>
+      ex_controller.io.potalIndexWrite.valid := false.B
+      ex_controller.io.potalIndexWrite.bits := DontCare
+      ex_controller.io.potalIndexConfig.valid := false.B
+      ex_controller.io.potalIndexConfig.bits := DontCare
+
+      reservation_station.io.potalIndexDescriptor := 0.U.asTypeOf(new PoTalIndexConfig)
+      reservation_station.io.potalIndexConfigured := false.B
+  }
 
   counters.io.event_io.collect(load_controller.io.counter)
   counters.io.event_io.collect(store_controller.io.counter)

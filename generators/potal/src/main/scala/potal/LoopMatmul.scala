@@ -757,6 +757,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
 
   val potalPairedAcc = Bool()
   val potalPairedResidual = Bool()
+  val potalIndexedWeight = Bool()
 
   val a_ex_spad_id = UInt(2.W)
   val b_ex_spad_id = UInt(2.W)
@@ -793,6 +794,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
 
     potalPairedAcc := false.B
     potalPairedResidual := false.B
+    potalIndexedWeight := false.B
 
     running := false.B
 
@@ -927,6 +929,9 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   when(potalExPreload && potalExLoop.potalEnabled) {
     io.out.bits.potal.valid := true.B
+    io.out.bits.potal.indexedWeight := potalExLoop.potalIndexedWeight
+    io.out.bits.potal.indexedKTile := ex.io.k
+    io.out.bits.potal.indexedJTile := ex.io.j
 
     // Runtime-configured scale block index.
     // Provided by LoopMatmulExecute.
@@ -1043,10 +1048,21 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
         // LOOP_WS
         val pairedAcc = cmd.bits.cmd.rs1(61)
         val pairedResidual = cmd.bits.cmd.rs1(62)
+        val indexedWeight = cmd.bits.cmd.rs1(63)
 
         loop_being_configured.potalPairedAcc := potalEnable && pairedAcc
 
         loop_being_configured.potalPairedResidual := potalEnable && pairedAcc && pairedResidual
+        loop_being_configured.potalIndexedWeight := indexedWeight &&
+                                                    potalEnable &&
+                                                    pairedAcc &&
+                                                    pairedResidual
+
+        when(indexedWeight) {
+          assert(potalEnable && pairedAcc && pairedResidual, "PoTal indexed Weight requires paired residual mode")
+          assert(loop_being_configured.b_dram_addr === 0.U, "Indexed Weight must reuse resident B without DMA")
+        }
+    
 
         when(pairedAcc || pairedResidual) {
           assert(potalEnable, "PoTal paired ACC requires PoTal mode")

@@ -49,13 +49,50 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     // Mesh-side completion of a PoTal PRELOAD.
     // This is not yet the final ROB completion.
     val potalMeshCompleted = Output(Valid(UInt(ROB_ID_WIDTH.W)))
-    
+    val potalIndexWrite = Flipped(Valid(new PoTalIndexWrite(potalIndexEntries)))
+    val potalIndexConfig = Flipped(Valid(new PoTalIndexConfig))   
+
+ 
     val busy = Output(Bool())
 
     val counter = new CounterEventIO()
   })
 
   val block_size = meshRows*tileRows
+
+  // DIM-independent index storage
+  private val indexEntries = potalIndexEntries
+
+  require(isPow2(block_size))
+  require(indexEntries >= block_size)
+
+  private val indexSlotWidth = log2Ceil(indexEntries)
+
+  // Each entry holds an absolute original K row
+  val indexTable = Reg(Vec(indexEntries, UInt(16.W)))
+  val indexPresent = RegInit(VecInit(Seq.fill(indexEntries)(false.B)))
+
+  val indexDescriptor = RegInit(0.U.asTypeOf(new PoTalIndexConfig))
+  val indexConfigured = RegInit(false.B)
+
+  // New B/index window configuration
+  when(io.potalIndexConfig.valid) {
+    indexDescriptor := io.potalIndexConfig.bits
+    indexConfigured := true.B
+
+    indexPresent.foreach(_ := false.B)
+  }
+
+  // Write one active-K index
+  when(io.potalIndexWrite.valid) {
+    assert(indexConfigured, "PoTal index write before config")
+    assert(io.potalIndexWrite.bits.slot < indexDescriptor.activeRows, "Index slot exceeds activeRows")
+    assert(io.potalIndexWrite.bits.sourceK < indexDescriptor.sourceKRows, "Source K exceeds original K")
+
+    indexTable(io.potalIndexWrite.bits.slot) := io.potalIndexWrite.bits.sourceK
+    indexPresent(io.potalIndexWrite.bits.slot) := true.B
+  }
+
 
   val mesh_tag = new Bundle with TagQueueTag {
     val rob_id = UDValid(UInt(log2Up(reservation_station_entries).W))
@@ -97,6 +134,9 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val DoPreloads = functs.map(_ === PRELOAD_CMD)
 
   val preload_cmd_place = Mux(DoPreloads(0), 0.U, 1.U)
+  val indexedPreloadMeta = cmd.bits(preload_cmd_place).potal
+  val potalIndexedPreload = indexedPreloadMeta.valid && indexedPreloadMeta.indexedWeight
+
   // val a_address_place = Mux(current_dataflow === Dataflow.WS.id.U, 0.U, Mux(preload_cmd_place === 0.U, 1.U, 2.U))
 
   val in_prop = functs(0) === COMPUTE_AND_FLIP_CMD
@@ -263,8 +303,37 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   val a_address = a_address_rs1 + a_addr_offset
   val b_address = b_address_rs2 + b_fire_counter
-  val d_address = d_address_rs1 + (block_size.U - 1.U - d_fire_counter)
+  // Existing WS reverse preload order
+  val d_logical_row = block_size.U - 1.U - d_fire_counter
 
+  // Logical position inside packed residual K
+  val indexSlotWide = indexedPreloadMeta.indexedKTile * block_size.U +& d_logical_row
+  val indexSlot = indexSlotWide(indexSlotWidth - 1, 0)
+
+  // Absolute K row in original B
+  val absoluteSourceK = indexTable(indexSlot)
+
+  // DIM-independent tile/row decomposition
+  val sourceKTile = absoluteSourceK >> log2Ceil(block_size)
+  val sourceKRow = absoluteSourceK(log2Ceil(block_size) - 1, 0)
+
+  // Original B is stored in K-tile-major,
+  // followed by J-tile-major layout.
+  val selectedBRow = (sourceKTile * indexDescriptor.jTiles +
+                      indexedPreloadMeta.indexedJTile) * 
+                      block_size.U + sourceKRow
+
+  val indexedSPRow = indexDescriptor.bBase +& selectedBRow
+  val indexedDAddress = WireInit(d_address_rs1)
+
+  indexedDAddress.data := indexedSPRow(indexedDAddress.data.getWidth - 1, 0)
+
+  // Indexed residual or conventional WS preload
+  val d_address = Mux(potalIndexedPreload,
+                      indexedDAddress,
+                      d_address_rs1 + d_logical_row)
+
+  
   val dataAbank = a_address.sp_bank()
   val dataBbank = b_address.sp_bank()
   val dataDbank = d_address.sp_bank()
@@ -372,6 +441,18 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val a_fire = a_valid && a_ready
   val b_fire = b_valid && b_ready
   val d_fire = d_valid && d_ready
+
+  when(potalIndexedPreload &&
+       start_inputting_d &&
+       d_row_is_not_all_zeros) {
+    assert(indexConfigured, "Indexed PRELOAD without INDEX_CONFIG")
+    assert(indexedPreloadMeta.indexedJTile < indexDescriptor.jTiles, "Indexed J tile out of range")
+    assert(indexSlotWide < indexEntries.U && indexSlotWide < indexDescriptor.activeRows, "Index slot out of range")
+    assert(indexPresent(indexSlot), "Indexed preload uses unwritten index")
+    assert(absoluteSourceK < indexDescriptor.sourceKRows, "Indexed source K out of range")
+    assert(indexedSPRow < (sp_banks * sp_bank_entries).U, "Indexed SP address out of range")
+    assert(!d_address_rs1.is_acc_addr, "Indexed Weight must be read from SP")
+}
 
   val firing = start_inputting_a || start_inputting_b || start_inputting_d
 

@@ -39,6 +39,10 @@ object GemminiISA {
   val POTAL_SCALE_RELEASE = 24.U
   val POTAL_FENCE         = 25.U
 
+  // Shared Weight Indexed Preload
+  val POTAL_INDEX_WRITE  = 26.U
+  val POTAL_INDEX_CONFIG = 27.U
+
   // rs1[2:0] values
   val CONFIG_EX = 0.U
   val CONFIG_LOAD = 1.U

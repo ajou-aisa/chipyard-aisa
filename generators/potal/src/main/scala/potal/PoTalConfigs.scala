@@ -9,6 +9,10 @@ import Arithmetic.SIntArithmetic
 // ============================================================
 
 object PoTalConfigs {
+  // index-window configuration.
+  // Initial test uses up to two packed residual K tiles.
+  val indexWindowKTiles = 2
+
 
   // W3-1:
   // A8W8 / DIM16 / WS / Sat32 ACC
@@ -104,6 +108,7 @@ object PoTalConfigs {
       // ------------------------------------------------------
 
       enablePoTalSat32Acc = true,
+      potalIndexWindowKTiles = indexWindowKTiles,
 
       // Will be enabled after W3-2 integration.
       enablePoTalWriteback = false,
