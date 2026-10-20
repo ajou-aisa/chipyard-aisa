@@ -88,7 +88,11 @@ static void mvout_acc0(volatile int32_t *dst) {
 static uint64_t scale_key(int phase, int col) {
     const uint64_t slot = phase == 0 ? SLOT0 : SLOT1;
     const uint64_t gen = phase == 0 ? GEN0 : GEN1;
-    return ((uint64_t)col << 16) | (gen << 8) | slot;
+
+    return ((uint64_t)col
+                << (POTAL_SCALE_SLOT_BITS + 8)) |
+           (gen << POTAL_SCALE_SLOT_BITS) |
+           slot;
 }
 
 static void set_scales(int phase, int release) {

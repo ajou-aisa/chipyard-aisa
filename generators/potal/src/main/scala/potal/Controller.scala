@@ -99,6 +99,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       Some(withClock(gated_clock) {
         Module(new PoTalScaleCommandIngress(
           dim = DIM,
+          scaleEntries = potalScaleEntries,
           indexEntries = potalIndexEntries,
           spRows = potalSpRows
         ))
@@ -110,7 +111,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val potalWritebackOpt =
     if (enablePoTalSat32Acc) {
       Some(withClock(gated_clock) {
-        Module(new PoTalWriteback(outer.config))
+        Module(new PoTalWriteback(outer.config, scaleEntries = potalScaleEntries))
       })
     } else {
       None
@@ -234,7 +235,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     rawFunct === POTAL_SCALE_RELEASE ||
     rawFunct === POTAL_FENCE ||
     rawFunct === POTAL_INDEX_WRITE ||
-    rawFunct === POTALINDEX_CONFIG
+    rawFunct === POTAL_INDEX_CONFIG
 
   val gemminiRawCmd = Wire(Decoupled(new GemminiCmd(reservation_station_entries)))
 
@@ -290,7 +291,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
-    new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t)) }
+    new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t), potalScaleEntries) }
 
   val unrolled_cmd = Queue(loop_cmd)
   unrolled_cmd.ready := false.B

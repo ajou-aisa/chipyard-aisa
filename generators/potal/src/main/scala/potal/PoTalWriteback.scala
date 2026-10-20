@@ -64,7 +64,7 @@ final class PoTalQueuedContext(
 // ingress are deliberately NOT connected in this module.
 final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
   config: GemminiArrayConfig[T, U, V],
-  scaleEntries: Int = 256,
+  scaleEntries: Int,
   generationWidth: Int = 8,
   workEntries: Int = 128,
   contextDepth: Int = 2,

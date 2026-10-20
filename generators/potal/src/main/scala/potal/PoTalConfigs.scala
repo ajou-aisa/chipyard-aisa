@@ -108,6 +108,7 @@ object PoTalConfigs {
       // ------------------------------------------------------
 
       enablePoTalSat32Acc = true,
+      potalScaleEntries = 256,
       potalIndexWindowKTiles = indexWindowKTiles,
 
       // Will be enabled after W3-2 integration.

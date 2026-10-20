@@ -93,10 +93,13 @@ static void mvin(unsigned bank, const volatile int32_t *src) {
 }
 
 static uint64_t key(unsigned phase, unsigned col) {
-    uint32_t slot = 8 + phase;
-    uint32_t generation = 7 + phase;
-    return ((uint64_t)col << 16) |
-           ((uint64_t)generation << 8) | slot;
+    const uint64_t slot = 8 + phase;
+    const uint64_t generation = 7 + phase;
+
+    return ((uint64_t)col
+                << (POTAL_SCALE_SLOT_BITS + 8)) |
+           (generation << POTAL_SCALE_SLOT_BITS) |
+           slot;
 }
 
 static void scale_command(unsigned phase, int release) {

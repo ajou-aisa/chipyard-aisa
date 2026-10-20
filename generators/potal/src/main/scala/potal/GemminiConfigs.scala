@@ -99,6 +99,7 @@ case class GemminiArrayConfig[T <: Data : Arithmetic, U <: Data, V <: Data](
                                                                              // PoTal: saturating INT32 accumulator RMW
                                                                              enablePoTalSat32Acc: Boolean = false,
                                                                              // Maximum logical K tiles represented by the index table
+                                                                             potalScaleEntries: Int = 256,
                                                                              potalIndexWindowKTiles: Int = 0,                                      
 
                                                                              // Reserved for W3-2: scale-aware SCU writeback
@@ -211,11 +212,17 @@ case class GemminiArrayConfig[T <: Data : Arithmetic, U <: Data, V <: Data](
       val entries = DIM.toLong * potalIndexWindowKTiles.toLong
 
       // Current INDEX_CONFIG/WRITE protocol uses 16-bit counts.
-      require(entries <= 65535L)
+      require(entries > 0 && entries <= Int.MaxValue, "PoTal index table capacitt overflow")
       entries.toInt
     } else {
       DIM
     }
+
+  require(!enablePoTalSat32Acc || 
+          (potalScaleEntries >= 2 && 
+           isPow2(potalScaleEntries) && 
+           potalScaleEntries <= (1 << 16)
+          ), "Invalid PoTal scale cache capacity")  
 
   //==========================================================================
   // cisc-gemmini miscellaneous constants (some redundant with above)
@@ -368,6 +375,17 @@ case class GemminiArrayConfig[T <: Data : Arithmetic, U <: Data, V <: Data](
     header ++= s"#define BANK_NUM $sp_banks\n"
     header ++= s"#define BANK_ROWS $sp_bank_entries\n"
     header ++= s"#define ACC_ROWS ${acc_banks * acc_bank_entries}\n" // TODO add ACC_BANKS as well
+
+    if (enablePoTalSat32Acc) {
+      header ++=
+        s"#define POTAL_SCALE_ENTRIES $potalScaleEntries\n"
+
+      header ++=
+        s"#define POTAL_SCALE_SLOT_BITS ${log2Up(potalScaleEntries)}\n"
+
+      header ++=
+        s"#define POTAL_INDEX_ENTRIES $potalIndexEntries\n"
+    }
 
     val max_bytes = 64
     header ++= s"#define MAX_BYTES $max_bytes\n"

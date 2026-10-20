@@ -41,21 +41,21 @@ final class PoTalScaleCommandResponse extends Bundle {
 
 final class PoTalIndexWrite(entries: Int) extends Bundle {
   val slot = UInt(log2Ceil(entries).W)
-  val sourceK = UInt(16.W)
+  val sourceK = UInt(32.W)
 }
 
 final class PoTalIndexConfig extends Bundle {
-  // Scratchpad row address
+  // Start of the resident B region in SP rows
   val bBase = UInt(32.W)
 
   // Number of original B N tiles
-  val jTiles = UInt(16.W)
+  val jTiles = UInt(32.W)
 
-  // Original B K rows
-  val sourceKRows = UInt(16.W)
+  // Total K rows in original B
+  val sourceKRows = UInt(32.W)
 
-  // Number of selected K rows
-  val activeRows = UInt(16.W)
+  // Selected residual K rows in this index window
+  val activeRows = UInt(32.W)
 }
 
 // ============================================================
@@ -73,23 +73,19 @@ final class PoTalIndexConfig extends Bundle {
 
 final class PoTalScaleCommandIngress(
   dim: Int,
-  scaleEntries: Int = PoTalProtocol.ScaleEntries,
-  generationWidth: Int = PoTalProtocol.GenerationWidth
+  scaleEntries: Int,
   indexEntries: Int,
-  spRows: Int
-
+  spRows: Int,
+  generationWidth: Int = PoTalProtocol.GenerationWidth,
 ) extends Module {
 
   require(Set(16, 32, 64).contains(dim))
-  require(
-    scaleEntries >= 2 &&
-    isPow2(scaleEntries) &&
-    scaleEntries <= 256
-  )
+  require(scaleEntries >= 2 && isPow2(scaleEntries))
+  require(scaleEntries <= (1 << 16))
   require(generationWidth == 8)
+
   require(isPow2(dim))
   require(indexEntries >= dim)
-  require(indexEntries <= 65535)
   require(spRows > 0)
 
   private val columnWidth = log2Ceil(dim)
@@ -151,9 +147,12 @@ final class PoTalScaleCommandIngress(
   val isIndexWrite = req.funct === POTAL_INDEX_WRITE
   val isIndexConfig = req.funct === POTAL_INDEX_CONFIG
 
-  val address = req.rs1(7, 0)
-  val generation = req.rs1(15, 8)
-  val column = req.rs1(21, 16)
+  private val keyWidth = slotWidth + generationWidth + columnWidth
+  require(keyWidth <= 64)
+
+  val address = req.rs1(slotWidth - 1, 0)
+  val generation = req.rs1(slotWidth + generationWidth - 1, slotWidth)
+  val column = req.rs1(keyWidth - 1, slotWidth + generationWidth)
   val carrier = req.rs2(31, 0)
 
   val columnValid = column < dim.U
@@ -161,30 +160,37 @@ final class PoTalScaleCommandIngress(
   val carrierValid =
     PoTalScaleEncoding.isValid(carrier)
 
+  val keyReservedZero =
+    if (keyWidth < 64)
+      !req.rs1(63, keyWidth).orR
+    else
+      true.B
+
   val writeEncodingValid =
-    !req.rs1(63, 22).orR &&
+    keyReservedZero &&
     !req.rs2(63, 32).orR
 
   val releaseEncodingValid =
-    !req.rs1(63, 22).orR &&
+    keyReservedZero &&
     req.rs2 === 0.U
 
   val fenceEncodingValid =
     req.rs1 === 0.U &&
     req.rs2 === 0.U
 
-  // INDEX_CONFIG:
-  // rs1[31:0]  = B scratchpad base (row address)
-  // rs1[47:32] = original J tile count
-  // rs1[63:48] = original K row count
-  // rs2[15:0]  = selected active-K count
+  // INDEX_CONFIG encoding:
+  //
+  // rs1[31:0]  = B scratchpad base
+  // rs1[63:32] = original J tiles
+  // rs2[31:0]  = original K rows
+  // rs2[63:32] = active K rows
 
   val cfgValue = Wire(new PoTalIndexConfig)
 
   cfgValue.bBase := req.rs1(31, 0)
-  cfgValue.jTiles := req.rs1(47, 32)
-  cfgValue.sourceKRows := req.rs1(63, 48)
-  cfgValue.activeRows := req.rs2(15, 0)
+  cfgValue.jTiles := req.rs1(63, 32)
+  cfgValue.sourceKRows := req.rs2(31, 0)
+  cfgValue.activeRows := req.rs2(63, 32)
 
   val sourceKTiles =
     (cfgValue.sourceKRows +& (dim - 1).U) >>
@@ -196,8 +202,7 @@ final class PoTalScaleCommandIngress(
   val regionEnd =
     cfgValue.bBase +& occupiedRows
 
-  val cfgEncodingValid =
-    req.xd && !req.rs2(63, 16).orR
+  val cfgEncodingValid = req.xd 
 
   val cfgAddressValid =
     cfgValue.jTiles =/= 0.U &&
@@ -214,19 +219,22 @@ final class PoTalScaleCommandIngress(
   io.indexDescriptor := indexDescriptorReg
   io.indexConfigured := indexConfiguredReg
 
-  // INDEX_WRITE:
-  // rs1[15:0] = logical index slot
-  // rs2[15:0] = absolute source K row
+  // INDEX_WRITE encoding:
+  //
+  // rs1[31:0] = logical index slot
+  // rs2[31:0] = absolute original K row
+  // Upper halves must be zero.
 
   val idxEncodingValid =
     req.xd &&
-    !req.rs1(63, 16).orR &&
-    !req.rs2(63, 16).orR
+    !req.rs1(63, 32).orR &&
+    !req.rs2(63, 32).orR
 
   val idxAddressValid =
     indexConfiguredReg &&
-    req.rs1(15, 0) < indexDescriptorReg.activeRows &&
-    req.rs2(15, 0) < indexDescriptorReg.sourceKRows
+    req.rs1(31, 0) < indexDescriptorReg.activeRows &&
+    req.rs1(31, 0) < indexEntries.U &&
+    req.rs2(31, 0) < indexDescriptorReg.sourceKRows
 
 
   val writeLegal =
@@ -307,8 +315,7 @@ final class PoTalScaleCommandIngress(
     idxAddressValid
 
   io.indexWrite.bits.slot := req.rs1(log2Ceil(indexEntries) - 1, 0)
-
-  io.indexWrite.bits.sourceK := req.rs2(15, 0)
+  io.indexWrite.bits.sourceK := req.rs2(31, 0)
 
   when(io.indexConfigWrite.valid) {
     indexDescriptorReg := cfgValue
@@ -349,14 +356,8 @@ final class PoTalScaleCommandIngress(
           PoTalScaleCommandStatus.INVALID_SCALE
 
       }.otherwise {
-        // ScaleMemory.ready is false when the
-        // slot is already allocated.
-        //
-        // A duplicate write must produce an error,
-        // not an infinite stall.
         io.cmd.ready :=
-          io.scaleLoad.ready ||
-          io.scaleConflict
+          io.scaleLoad.ready || io.scaleConflict
 
         when(io.scaleConflict) {
           nextStatus :=
@@ -383,35 +384,46 @@ final class PoTalScaleCommandIngress(
 
       }.otherwise {
         io.cmd.ready :=
-          io.releaseSafe &&
-          io.scaleRelease.ready
+          io.releaseSafe && io.scaleRelease.ready
 
-        // releaseMiss is combinational and is
-        // observed in the release handshake cycle.
         when(io.releaseMiss) {
           nextStatus :=
             PoTalScaleCommandStatus.RELEASE_MISS
         }
-      }.elsewhen(isIndexConfig) {
-        when(!cfgEncodingValid) {
-          io.cmd.ready := true.B
-          nextStatus := PoTalScaleCommandStatus.INVALID_ENCODING
-        }.elsewhen(!cfgAddressValid) {
-          io.cmd.ready := true.B
-          nextStatus := PoTalScaleCommandStatus.INVALID_ADDRESS
-        }.otherwise {
-          io.cmd.ready := io.fenceDrained
-        }
-      }.elsewhen(isIndexWrite) {
-        when(!idxEncodingValid) {
-          io.cmd.ready := true.B
-          nextStatus := PoTalScaleCommandStatus.INVALID_ENCODING
-        }.elsewhen(!idxAddressValid) {
-          io.cmd.ready := true.B
-          nextStatus := PoTalScaleCommandStatus.INVALID_ADDRESS
-        }.otherwise {
-          io.cmd.ready := io.fenceDrained
-        }
+      }
+
+    }.elsewhen(isIndexConfig) {
+
+      when(!cfgEncodingValid) {
+        io.cmd.ready := true.B
+        nextStatus :=
+          PoTalScaleCommandStatus.INVALID_ENCODING
+
+      }.elsewhen(!cfgAddressValid) {
+        io.cmd.ready := true.B
+        nextStatus :=
+          PoTalScaleCommandStatus.INVALID_ADDRESS
+
+      }.otherwise {
+        io.cmd.ready := io.fenceDrained
+      }
+
+    }.elsewhen(isIndexWrite) {
+
+      when(!idxEncodingValid) {
+        io.cmd.ready := true.B
+        nextStatus :=
+          PoTalScaleCommandStatus.INVALID_ENCODING
+
+      }.elsewhen(!idxAddressValid) {
+        io.cmd.ready := true.B
+        nextStatus :=
+          PoTalScaleCommandStatus.INVALID_ADDRESS
+
+      }.otherwise {
+        io.cmd.ready := io.fenceDrained
+      }
+
     }.elsewhen(isFence) {
 
       when(!req.xd || !fenceEncodingValid) {

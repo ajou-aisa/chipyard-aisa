@@ -226,15 +226,15 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
     when (funct === PRELOAD_CMD) {
       // TODO check b_transpose here iff WS mode is enabled
       val indexed =io.alloc.bits.potal.valid && io.alloc.bits.potal.indexedWeight 
-      val preload_rows = cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
+      val preloadRows = cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
 
-      val originalKTiles = (io.potalIndexedDescriptor.sourceKRows +& (block_rows - 1).U) >> log2Ceil(block_rows)
-      val residentRoes = originalKTiles * io.potalIndexedDescriptor.jTiles * block_rows.U
+      val originalKTiles = (io.potalIndexDescriptor.sourceKRows +& (block_rows - 1).U) >> log2Ceil(block_rows)
+      val residentRows = originalKTiles * io.potalIndexDescriptor.jTiles * block_rows.U
 
       when (indexed) {
-        assert(io.potalIndexedConfigured, "Indexed preload without B descriptor")
+        assert(io.potalIndexConfigured, "Indexed preload without B descriptor")
         
-        op1.bits.start := LocalAddr.cast_to_sp_addr(local_addr_t, io.potalIndexedDecriptor.bBase)
+        op1.bits.start := LocalAddr.cast_to_sp_addr(local_addr_t, io.potalIndexDescriptor.bBase)
       }
       
       val hazardRows = Mux(indexed, residentRows, preloadRows)

@@ -69,7 +69,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   private val indexSlotWidth = log2Ceil(indexEntries)
 
   // Each entry holds an absolute original K row
-  val indexTable = Reg(Vec(indexEntries, UInt(16.W)))
+  val indexTable = Reg(Vec(indexEntries, UInt(32.W)))
   val indexPresent = RegInit(VecInit(Seq.fill(indexEntries)(false.B)))
 
   val indexDescriptor = RegInit(0.U.asTypeOf(new PoTalIndexConfig))
@@ -327,11 +327,17 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val indexedDAddress = WireInit(d_address_rs1)
 
   indexedDAddress.data := indexedSPRow(indexedDAddress.data.getWidth - 1, 0)
+  // Only substitute an indexed address when
+  // the original WS preload actually reads Weight.
+  val indexedWeightRead =
+    potalIndexedPreload &&
+    !d_address_rs1.is_garbage()
 
-  // Indexed residual or conventional WS preload
-  val d_address = Mux(potalIndexedPreload,
-                      indexedDAddress,
-                      d_address_rs1 + d_logical_row)
+  val d_address = Mux(
+    indexedWeightRead,
+    indexedDAddress,
+    d_address_rs1 + d_logical_row
+  )
 
   
   val dataAbank = a_address.sp_bank()
@@ -442,7 +448,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val b_fire = b_valid && b_ready
   val d_fire = d_valid && d_ready
 
-  when(potalIndexedPreload &&
+  when(indexedWeightRead &&
        start_inputting_d &&
        d_row_is_not_all_zeros) {
     assert(indexConfigured, "Indexed PRELOAD without INDEX_CONFIG")

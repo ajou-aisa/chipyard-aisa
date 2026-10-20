@@ -817,7 +817,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
 class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size: Int, max_lds: Int, max_exs: Int, max_sts: Int,
                  max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
                  mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
-                 compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2)
+                 compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int)
                 (implicit p: Parameters) extends Module {
   val iterator_bitwidth = 16
   val max_block_len = (dma_max_bytes / (block_size * input_w / 8)) max 1
@@ -950,7 +950,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
       // Verify the address before truncating it to the physical scale-cache address width.
       val scaleSlot = potalExLoop.potalScaleBase +& (ex.io.scaleBlockIndex * potalExLoop.max_j) +& ex.io.j
-      assert(scaleSlot < PoTalProtocol.ScaleEntries.U, "PoTal: scale cache address overflow")
+      assert(scaleSlot < scaleEntries.U, "PoTal: scale cache address overflow")
     }
   }
 
@@ -1095,11 +1095,11 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
           assert(passesPerBlock =/= 0.U, "PoTal: passesPerBlock must be positive")
           assert(maxI > 0.U && maxJ > 0.U && maxK > 0.U, "PoTal: invalid dimensions")
           assert(outputTiles <= PoTalProtocol.WorkIdsPerLoop.U, "PoTal: work ID capacity exceeded")
-          assert(scaleBase <= PoTalProtocol.ScaleEntries.U, "PoTal: invalid scale base")
+          assert(scaleBase <= scaleEntries.U, "PoTal: invalid scale base")
 
           // At least the first N-tile scale block
           // must fit in the selected scale window
-          assert(maxJ <= (PoTalProtocol.ScaleEntries.U - scaleBase), "PoTal: first scale block exceeds cache")
+          assert(maxJ <= (scaleEntries.U - scaleBase), "PoTal: first scale block exceeds cache")
           assert(loop_being_configured.pad_i < block_size.U && 
                  loop_being_configured.pad_j < block_size.U &&
                  loop_being_configured.pad_k < block_size.U, "PoTal: invalid padding")
@@ -1294,11 +1294,11 @@ object LoopMatmul {
             block_size: Int, coreMaxAddrBits: Int, rob_size: Int, max_lds: Int, max_exs: Int, max_sts: Int,
             max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
             mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
-            compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2)
+            compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int)
            (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool) = {
     val mod = Module(new LoopMatmul(block_size, coreMaxAddrBits, rob_size, max_lds, max_exs, max_sts,
       max_addr, max_acc_addr, input_w, acc_w, dma_max_bytes,
-      mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t))
+      mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries))
     mod.io.in <> in
     mod.io.ld_completed := ld_completed
     mod.io.st_completed := st_completed

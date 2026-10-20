@@ -8,8 +8,6 @@ object PoTalProtocol {
   // No fixed DIM or scale BlockSize.
   // scaleBlockK = config.DIM * passesPerBlock
 
-  val ScaleEntries = 256
-
   val GenerationWidth = 8
 
   val WorkEntries = 128
