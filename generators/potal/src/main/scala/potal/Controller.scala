@@ -329,8 +329,11 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       ex_controller.io.potalIndexWrite := ingress.io.indexWrite
       ex_controller.io.potalIndexConfig := ingress.io.indexConfigWrite
 
-      reservation_station.io.potalIndexDescriptor := ingress.io.indexDescriptor
-      reservation_station.io.potalIndexConfigured := ingress.io.indexConfigured
+      reservation_station.io.potalIndexDescriptors :=
+        ingress.io.indexDescriptors
+
+      reservation_station.io.potalIndexConfiguredByBuffer :=
+        ingress.io.indexConfiguredByBuffer
 
     case None =>
       ex_controller.io.potalIndexWrite.valid := false.B
@@ -338,8 +341,18 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       ex_controller.io.potalIndexConfig.valid := false.B
       ex_controller.io.potalIndexConfig.bits := DontCare
 
-      reservation_station.io.potalIndexDescriptor := 0.U.asTypeOf(new PoTalIndexConfig)
-      reservation_station.io.potalIndexConfigured := false.B
+      reservation_station.io.potalIndexDescriptors :=
+        0.U.asTypeOf(
+          Vec(
+            PoTalProtocol.WeightBufferCount,
+            new PoTalIndexConfig
+          )
+        )
+
+      reservation_station.io.potalIndexConfiguredByBuffer :=
+        VecInit(
+          Seq.fill(PoTalProtocol.WeightBufferCount)(false.B)
+        )
   }
 
   counters.io.event_io.collect(load_controller.io.counter)

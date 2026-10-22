@@ -1049,6 +1049,13 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   when(potalExPreload && potalExLoop.potalEnabled) {
     io.out.bits.potal.valid := true.B
     io.out.bits.potal.indexedWeight := potalExLoop.potalIndexedWeight
+
+    // Select the Index Table associated with the resident Weight bank.
+    // b_ex_spad_id=1 -> buffer 0 (Bank 1)
+    // b_ex_spad_id=2 -> buffer 1 (Bank 3)
+    io.out.bits.potal.weightBufferId :=
+      Mux(potalExLoop.b_ex_spad_id === 2.U, 1.U, 0.U)
+
     io.out.bits.potal.indexedKTile := ex.io.k
     io.out.bits.potal.indexedJTile := ex.io.j
 
@@ -1205,6 +1212,14 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
         when(indexedWeight) {
           assert(potalEnable && pairedAcc && pairedResidual, "PoTal indexed Weight requires paired residual mode")
           assert(loop_being_configured.b_dram_addr === 0.U, "Indexed Weight must reuse resident B without DMA")
+
+          // Indexed Weight must select one of the two physical bank pairs.
+          val weightBankPair = cmd.bits.cmd.rs1(17, 16)
+
+          assert(
+            weightBankPair === 1.U || weightBankPair === 2.U,
+            "PoTal indexed Weight requires bank pair 1 or 2"
+          )
         }
     
 

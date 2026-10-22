@@ -42,6 +42,7 @@ final class PoTalScaleCommandResponse extends Bundle {
 final class PoTalIndexWrite(entries: Int) extends Bundle {
   val slot = UInt(log2Ceil(entries).W)
   val sourceK = UInt(32.W)
+  val weightBufferId = UInt(PoTalProtocol.WeightBufferIdWidth.W)
 }
 
 final class PoTalIndexConfig extends Bundle {
@@ -56,6 +57,7 @@ final class PoTalIndexConfig extends Bundle {
 
   // Selected residual K rows in this index window
   val activeRows = UInt(32.W)
+  val weightBufferId = UInt(PoTalProtocol.WeightBufferIdWidth.W)
 }
 
 // ============================================================
@@ -87,6 +89,8 @@ final class PoTalScaleCommandIngress(
   require(isPow2(dim))
   require(indexEntries >= dim)
   require(spRows > 0)
+  require(PoTalProtocol.WeightBufferCount == 2)
+  require(spRows % 4 == 0)
 
   private val columnWidth = log2Ceil(dim)
   private val slotWidth = log2Ceil(scaleEntries)
@@ -127,6 +131,13 @@ final class PoTalScaleCommandIngress(
     val indexConfigWrite = Valid(new PoTalIndexConfig)
     val indexDescriptor = Output(new PoTalIndexConfig)
     val indexConfigured = Output(Bool())
+
+    // Independent descriptors for two resident Weight buffers.
+    val indexDescriptors =
+      Output(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
+
+    val indexConfiguredByBuffer =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
   })
 
   // ----------------------------------------------------------
@@ -192,6 +203,14 @@ final class PoTalScaleCommandIngress(
   cfgValue.sourceKRows := req.rs2(31, 0)
   cfgValue.activeRows := req.rs2(63, 32)
 
+  // Determine the resident Weight buffer from its SP base.
+  // Buffer 0: Bank 1
+  // Buffer 1: Bank 3
+  val configuredWeightBufferId =
+    (cfgValue.bBase >= (spRows / 2).U).asUInt
+
+  cfgValue.weightBufferId := configuredWeightBufferId
+
   val sourceKTiles =
     (cfgValue.sourceKRows +& (dim - 1).U) >>
       log2Ceil(dim)
@@ -204,20 +223,52 @@ final class PoTalScaleCommandIngress(
 
   val cfgEncodingValid = req.xd 
 
+  // A resident Weight block must fit entirely inside its
+  // corresponding physical Weight bank.
+  val weightRegionStart =
+    Mux(configuredWeightBufferId === 0.U,
+      (spRows / 4).U,
+      (3 * spRows / 4).U)
+
+  val weightRegionEnd =
+    Mux(configuredWeightBufferId === 0.U,
+      (spRows / 2).U,
+      spRows.U)
+
   val cfgAddressValid =
     cfgValue.jTiles =/= 0.U &&
     cfgValue.sourceKRows =/= 0.U &&
     cfgValue.activeRows =/= 0.U &&
     cfgValue.activeRows <= indexEntries.U &&
-    cfgValue.bBase < spRows.U &&
-    regionEnd <= spRows.U
+    cfgValue.bBase >= weightRegionStart &&
+    cfgValue.bBase < weightRegionEnd &&
+    regionEnd <= weightRegionEnd
 
-  val indexDescriptorReg = RegInit(0.U.asTypeOf(new PoTalIndexConfig))
+  // Two independent Weight descriptors and configured bits.
+  val indexDescriptorRegs = RegInit(VecInit(Seq.fill(
+    PoTalProtocol.WeightBufferCount)(
+      0.U.asTypeOf(new PoTalIndexConfig)
+    )
+  ))
 
-  val indexConfiguredReg = RegInit(false.B)
+  val indexConfiguredRegs = RegInit(VecInit(Seq.fill(
+    PoTalProtocol.WeightBufferCount)(false.B)
+  ))
 
-  io.indexDescriptor := indexDescriptorReg
-  io.indexConfigured := indexConfiguredReg
+  // INDEX_WRITE targets the last successfully configured buffer.
+  val selectedWeightBufferId =
+    RegInit(0.U(PoTalProtocol.WeightBufferIdWidth.W))
+
+  // Legacy single-descriptor outputs remain available until
+  // ReservationStation and ExecuteController are converted.
+  io.indexDescriptor :=
+    indexDescriptorRegs(selectedWeightBufferId)
+
+  io.indexConfigured :=
+    indexConfiguredRegs(selectedWeightBufferId)
+
+  io.indexDescriptors := indexDescriptorRegs
+  io.indexConfiguredByBuffer := indexConfiguredRegs
 
   // INDEX_WRITE encoding:
   //
@@ -230,11 +281,14 @@ final class PoTalScaleCommandIngress(
     !req.rs1(63, 32).orR &&
     !req.rs2(63, 32).orR
 
+  val writeDescriptor =
+    indexDescriptorRegs(selectedWeightBufferId)
+
   val idxAddressValid =
-    indexConfiguredReg &&
-    req.rs1(31, 0) < indexDescriptorReg.activeRows &&
+    indexConfiguredRegs(selectedWeightBufferId) &&
+    req.rs1(31, 0) < writeDescriptor.activeRows &&
     req.rs1(31, 0) < indexEntries.U &&
-    req.rs2(31, 0) < indexDescriptorReg.sourceKRows
+    req.rs2(31, 0) < writeDescriptor.sourceKRows
 
 
   val writeLegal =
@@ -314,12 +368,16 @@ final class PoTalScaleCommandIngress(
     idxEncodingValid &&
     idxAddressValid
 
-  io.indexWrite.bits.slot := req.rs1(log2Ceil(indexEntries) - 1, 0)
+  io.indexWrite.bits.slot :=
+    req.rs1(log2Ceil(indexEntries) - 1, 0)
+
   io.indexWrite.bits.sourceK := req.rs2(31, 0)
+  io.indexWrite.bits.weightBufferId := selectedWeightBufferId
 
   when(io.indexConfigWrite.valid) {
-    indexDescriptorReg := cfgValue
-    indexConfiguredReg := true.B
+    indexDescriptorRegs(configuredWeightBufferId) := cfgValue
+    indexConfiguredRegs(configuredWeightBufferId) := true.B
+    selectedWeightBufferId := configuredWeightBufferId
   }
 
   // ----------------------------------------------------------

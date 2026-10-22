@@ -14,6 +14,10 @@ object PoTalProtocol {
   val WorkIdWidth = 7
   val WorkIdsPerLoop = 64
 
+  // One indexed Weight buffer per Scratchpad bank pair.
+  val WeightBufferCount = 2
+  val WeightBufferIdWidth = 1
+
   // CPU-side contract:
   // passesPerBlock = scaleBlockK / DIM
   // passesPerBlock >= 1
@@ -58,6 +62,12 @@ class PoTalCommandMetadata extends Bundle {
 
   // Indexed Shared Weight
   val indexedWeight = Bool()
+
+  // Resident Weight buffer selecting its Index Table and Descriptor.
+  // 0: Scratchpad bank pair 0/1
+  // 1: Scratchpad bank pair 2/3
+  val weightBufferId =
+    UInt(PoTalProtocol.WeightBufferIdWidth.W)
 
   // Residual logical K tile index
   val indexedKTile = UInt(16.W)

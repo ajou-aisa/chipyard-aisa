@@ -55,8 +55,12 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     // Unlike busy, this is true only when every reservation-station entry has been retired.
     val drained = Output(Bool())
-    val potalIndexDescriptor = Input(new PoTalIndexConfig)
-    val potalIndexConfigured = Input(Bool())
+    // Independent descriptors for resident Weight buffers.
+    val potalIndexDescriptors =
+      Input(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
+
+    val potalIndexConfiguredByBuffer =
+      Input(Vec(PoTalProtocol.WeightBufferCount, Bool()))
 
     val counter = new CounterEventIO()
   })
@@ -225,16 +229,46 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     when (funct === PRELOAD_CMD) {
       // TODO check b_transpose here iff WS mode is enabled
-      val indexed =io.alloc.bits.potal.valid && io.alloc.bits.potal.indexedWeight 
-      val preloadRows = cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
+      val indexed =
+        io.alloc.bits.potal.valid &&
+        io.alloc.bits.potal.indexedWeight
 
-      val originalKTiles = (io.potalIndexDescriptor.sourceKRows +& (block_rows - 1).U) >> log2Ceil(block_rows)
-      val residentRows = originalKTiles * io.potalIndexDescriptor.jTiles * block_rows.U
+      val preloadRows =
+        cmd.rs1(48 + log2Up(block_rows + 1) - 1, 48)
+
+      // Select the descriptor belonging to this PRELOAD.
+      val weightBufferId =
+        io.alloc.bits.potal.weightBufferId
+
+      val selectedDescriptor =
+        io.potalIndexDescriptors(weightBufferId)
+
+      val selectedConfigured =
+        io.potalIndexConfiguredByBuffer(weightBufferId)
+
+      val originalKTiles =
+        (selectedDescriptor.sourceKRows +& (block_rows - 1).U) >>
+          log2Ceil(block_rows)
+
+      val residentRows =
+        originalKTiles * selectedDescriptor.jTiles * block_rows.U
 
       when (indexed) {
-        assert(io.potalIndexConfigured, "Indexed preload without B descriptor")
-        
-        op1.bits.start := LocalAddr.cast_to_sp_addr(local_addr_t, io.potalIndexDescriptor.bBase)
+        assert(
+          selectedConfigured,
+          "Indexed PRELOAD without Weight Buffer descriptor"
+        )
+
+        assert(
+          selectedDescriptor.weightBufferId === weightBufferId,
+          "Indexed PRELOAD Weight Buffer mismatch"
+        )
+
+        op1.bits.start :=
+          LocalAddr.cast_to_sp_addr(
+            local_addr_t,
+            selectedDescriptor.bBase
+          )
       }
       
       val hazardRows = Mux(indexed, residentRows, preloadRows)

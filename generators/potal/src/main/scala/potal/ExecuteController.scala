@@ -64,37 +64,69 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   val block_size = meshRows*tileRows
 
-  // DIM-independent index storage
+  // Indexed Weight state is private to each Scratchpad bank pair.
   private val indexEntries = potalIndexEntries
+  private val weightBufferCount = PoTalProtocol.WeightBufferCount
 
   require(isPow2(block_size))
   require(indexEntries >= block_size)
+  require(weightBufferCount == 2)
 
   private val indexSlotWidth = log2Ceil(indexEntries)
 
-  // Each entry holds an absolute original K row
-  val indexTable = Reg(Vec(indexEntries, UInt(32.W)))
-  val indexPresent = RegInit(VecInit(Seq.fill(indexEntries)(false.B)))
+  // Each slot stores one absolute original K row.
+  // INDEX_CONFIG invalidates only the selected buffer.
+  val indexTables =
+    Reg(Vec(weightBufferCount, Vec(indexEntries, UInt(32.W))))
 
-  val indexDescriptor = RegInit(0.U.asTypeOf(new PoTalIndexConfig))
-  val indexConfigured = RegInit(false.B)
+  val indexValidBits = RegInit(VecInit(Seq.fill(weightBufferCount)(
+    VecInit(Seq.fill(indexEntries)(false.B)))))
 
-  // New B/index window configuration
-  when(io.potalIndexConfig.valid) {
-    indexDescriptor := io.potalIndexConfig.bits
-    indexConfigured := true.B
+  val indexDescriptors = RegInit(VecInit(Seq.fill(weightBufferCount)(
+    0.U.asTypeOf(new PoTalIndexConfig))))
 
-    indexPresent.foreach(_ := false.B)
-  }
+  val indexConfiguredByBuffer =
+    RegInit(VecInit(Seq.fill(weightBufferCount)(false.B)))
 
-  // Write one active-K index
-  when(io.potalIndexWrite.valid) {
-    assert(indexConfigured, "PoTal index write before config")
-    assert(io.potalIndexWrite.bits.slot < indexDescriptor.activeRows, "Index slot exceeds activeRows")
-    assert(io.potalIndexWrite.bits.sourceK < indexDescriptor.sourceKRows, "Source K exceeds original K")
+  for (buffer <- 0 until weightBufferCount) {
 
-    indexTable(io.potalIndexWrite.bits.slot) := io.potalIndexWrite.bits.sourceK
-    indexPresent(io.potalIndexWrite.bits.slot) := true.B
+    // Configure only the selected Weight buffer.
+    when(io.potalIndexConfig.valid &&
+         io.potalIndexConfig.bits.weightBufferId === buffer.U) {
+
+      indexDescriptors(buffer) := io.potalIndexConfig.bits
+      indexConfiguredByBuffer(buffer) := true.B
+
+      indexValidBits(buffer).foreach(_ := false.B)
+    }
+
+    // Write into the selected buffer's Index Table.
+    when(io.potalIndexWrite.valid &&
+         io.potalIndexWrite.bits.weightBufferId === buffer.U) {
+
+      assert(
+        indexConfiguredByBuffer(buffer),
+        "PoTal index write before selected buffer config"
+      )
+
+      assert(
+        io.potalIndexWrite.bits.slot <
+          indexDescriptors(buffer).activeRows,
+        "PoTal index slot exceeds selected buffer active rows"
+      )
+
+      assert(
+        io.potalIndexWrite.bits.sourceK <
+          indexDescriptors(buffer).sourceKRows,
+        "PoTal source K exceeds selected buffer original K"
+      )
+
+      indexTables(buffer)(io.potalIndexWrite.bits.slot) :=
+        io.potalIndexWrite.bits.sourceK
+
+      indexValidBits(buffer)(io.potalIndexWrite.bits.slot) :=
+        true.B
+    }
   }
 
 
@@ -140,6 +172,15 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val preload_cmd_place = Mux(DoPreloads(0), 0.U, 1.U)
   val indexedPreloadMeta = cmd.bits(preload_cmd_place).potal
   val potalIndexedPreload = indexedPreloadMeta.valid && indexedPreloadMeta.indexedWeight
+
+  // Select the Index Table associated with this PRELOAD.
+  val indexedWeightBufferId = indexedPreloadMeta.weightBufferId
+
+  val selectedIndexDescriptor =
+    indexDescriptors(indexedWeightBufferId)
+
+  val selectedIndexConfigured =
+    indexConfiguredByBuffer(indexedWeightBufferId)
 
   // val a_address_place = Mux(current_dataflow === Dataflow.WS.id.U, 0.U, Mux(preload_cmd_place === 0.U, 1.U, 2.U))
 
@@ -315,7 +356,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val indexSlot = indexSlotWide(indexSlotWidth - 1, 0)
 
   // Absolute K row in original B
-  val absoluteSourceK = indexTable(indexSlot)
+  val absoluteSourceK =
+    indexTables(indexedWeightBufferId)(indexSlot)
 
   // DIM-independent tile/row decomposition
   val sourceKTile = absoluteSourceK >> log2Ceil(block_size)
@@ -323,11 +365,12 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   // Original B is stored in K-tile-major,
   // followed by J-tile-major layout.
-  val selectedBRow = (sourceKTile * indexDescriptor.jTiles +
+  val selectedBRow = (sourceKTile * selectedIndexDescriptor.jTiles +
                       indexedPreloadMeta.indexedJTile) * 
                       block_size.U + sourceKRow
 
-  val indexedSPRow = indexDescriptor.bBase +& selectedBRow
+  val indexedSPRow =
+    selectedIndexDescriptor.bBase +& selectedBRow
   val indexedDAddress = WireInit(d_address_rs1)
 
   indexedDAddress.data := indexedSPRow(indexedDAddress.data.getWidth - 1, 0)
@@ -455,11 +498,36 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   when(indexedWeightRead &&
        start_inputting_d &&
        d_row_is_not_all_zeros) {
-    assert(indexConfigured, "Indexed PRELOAD without INDEX_CONFIG")
-    assert(indexedPreloadMeta.indexedJTile < indexDescriptor.jTiles, "Indexed J tile out of range")
-    assert(indexSlotWide < indexEntries.U && indexSlotWide < indexDescriptor.activeRows, "Index slot out of range")
-    assert(indexPresent(indexSlot), "Indexed preload uses unwritten index")
-    assert(absoluteSourceK < indexDescriptor.sourceKRows, "Indexed source K out of range")
+    assert(
+      selectedIndexConfigured,
+      "Indexed PRELOAD without selected buffer config"
+    )
+
+    assert(
+      selectedIndexDescriptor.weightBufferId === indexedWeightBufferId,
+      "Indexed PRELOAD Weight Buffer ID does not match descriptor"
+    )
+
+    assert(
+      indexedPreloadMeta.indexedJTile < selectedIndexDescriptor.jTiles,
+      "Indexed J tile out of range"
+    )
+
+    assert(
+      indexSlotWide < indexEntries.U &&
+      indexSlotWide < selectedIndexDescriptor.activeRows,
+      "Index slot out of range"
+    )
+
+    assert(
+      indexValidBits(indexedWeightBufferId)(indexSlot),
+      "Indexed preload uses unwritten index in selected buffer"
+    )
+
+    assert(
+      absoluteSourceK < selectedIndexDescriptor.sourceKRows,
+      "Indexed source K out of range"
+    )
     assert(indexedSPRow < (sp_banks * sp_bank_entries).U, "Indexed SP address out of range")
     assert(!d_address_rs1.is_acc_addr, "Indexed Weight must be read from SP")
 }
