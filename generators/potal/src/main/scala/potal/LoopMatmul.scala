@@ -759,6 +759,9 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
   val potalPairedResidual = Bool()
   val potalIndexedWeight = Bool()
 
+  // H2-2B1: bank-local A offset measured in DIM-row tiles.
+  val potalAOffsetTiles = UInt(log2Up(max_addr).W)
+
   val a_ex_spad_id = UInt(2.W)
   val b_ex_spad_id = UInt(2.W)
   val configured = Bool()
@@ -795,6 +798,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
     potalPairedAcc := false.B
     potalPairedResidual := false.B
     potalIndexedWeight := false.B
+    potalAOffsetTiles := 0.U
 
     running := false.B
 
@@ -1045,6 +1049,31 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
         // rs1[60:45] : passesPerBlock 
         val potalEnable = cmd.bits.cmd.rs1(20)
 
+        // H2-2B1: LOOP_WS rs2[31:3] gives the A offset within
+        // the selected bank in units of block_size Scratchpad rows.
+        val aOffsetTiles = cmd.bits.cmd.rs2(31, 3)
+        loop_being_configured.potalAOffsetTiles :=
+          Mux(potalEnable, aOffsetTiles, 0.U)
+
+        // Each selected pair contains one A bank and one B bank.
+        // Preserve legacy behavior when the offset is zero.
+        when (potalEnable && (aOffsetTiles =/= 0.U)) {
+          val aFootprintTiles =
+            loop_being_configured.max_i * loop_being_configured.max_k
+          val aBankCapacityTiles =
+            max_addr / (2 * concurrent_loops * block_size)
+
+          assert(
+            (aOffsetTiles +& aFootprintTiles) <= aBankCapacityTiles.U,
+            "PoTal: A bank-local offset and A footprint exceed one A bank"
+          )
+          assert(
+            (cmd.bits.cmd.rs1(19, 18) === 1.U) ||
+            (cmd.bits.cmd.rs1(19, 18) === 2.U),
+            "PoTal: nonzero A offset requires bank pair selector 1 or 2"
+          )
+        }
+
         // LOOP_WS
         val pairedAcc = cmd.bits.cmd.rs1(61)
         val pairedResidual = cmd.bits.cmd.rs1(62)
@@ -1127,7 +1156,11 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldA.io.req.bits.dram_addr := loop_requesting_ldA.a_dram_addr
   ldA.io.req.bits.dram_stride := loop_requesting_ldA.a_dram_stride
   ldA.io.req.bits.transpose := loop_requesting_ldA.a_transpose
-  ldA.io.req.bits.addr_start := Mux(loop_requesting_ldA.a_ex_spad_id === 0.U, loop_requesting_ldA.a_addr_start, (loop_requesting_ldA.a_ex_spad_id - 1.U) * (max_addr / concurrent_loops).U)
+  val ldARegionBase = Mux(loop_requesting_ldA.a_ex_spad_id === 0.U,
+    loop_requesting_ldA.a_addr_start,
+    (loop_requesting_ldA.a_ex_spad_id - 1.U) * (max_addr / concurrent_loops).U)
+  ldA.io.req.bits.addr_start := ldARegionBase +
+    loop_requesting_ldA.potalAOffsetTiles * block_size.U
   ldA.io.req.bits.loop_id := loop_requesting_ldA_id
   ldA.io.req.bits.is_resadd := is_resadd
 
@@ -1170,7 +1203,11 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   ex.io.req.bits.passesPerBlock := loop_requesting_ex.potalPassesPerBlock
 
-  ex.io.req.bits.a_addr_start := Mux(loop_requesting_ex.a_ex_spad_id === 0.U, loop_requesting_ex.a_addr_start, (loop_requesting_ex.a_ex_spad_id - 1.U) * (max_addr / concurrent_loops).U)
+  val exARegionBase = Mux(loop_requesting_ex.a_ex_spad_id === 0.U,
+    loop_requesting_ex.a_addr_start,
+    (loop_requesting_ex.a_ex_spad_id - 1.U) * (max_addr / concurrent_loops).U)
+  ex.io.req.bits.a_addr_start := exARegionBase +
+    loop_requesting_ex.potalAOffsetTiles * block_size.U
   ex.io.req.bits.b_addr_end := Mux(loop_requesting_ex.b_ex_spad_id === 0.U, loop_requesting_ex.b_addr_end, (loop_requesting_ex.b_ex_spad_id) * (max_addr / concurrent_loops).U) 
   ex.io.req.bits.a_tranpose := loop_requesting_ex.a_transpose
   ex.io.req.bits.b_tranpose := loop_requesting_ex.b_transpose
