@@ -513,6 +513,109 @@ final class PoTalScaleCommandIngress(
     }
   }
 
+  // ============================================================
+  // H2-2C: Same-buffer Index Update protection monitor.
+  //
+  // Count only cycles where a legal Index command is blocked
+  // by the targeted Weight buffer being busy.
+  //
+  // Exclude responsePending cycles so the measurement does
+  // not include RoCC response backpressure.
+  //
+  // Report the number of blocked cycles when the command
+  // is finally accepted. A zero-wait update is not printed.
+  // ============================================================
+
+  val blockedIndexConfigCycles =
+    RegInit(VecInit(
+      Seq.fill(PoTalProtocol.WeightBufferCount)(0.U(32.W))
+    ))
+
+  val blockedIndexWriteCycles =
+    RegInit(VecInit(
+      Seq.fill(PoTalProtocol.WeightBufferCount)(0.U(32.W))
+    ))
+
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+
+    val configRequest =
+      io.cmd.valid &&
+      !responsePending &&
+      isIndexConfig &&
+      cfgEncodingValid &&
+      cfgAddressValid &&
+      (configuredWeightBufferId === buffer.U)
+
+    val writeRequest =
+      io.cmd.valid &&
+      !responsePending &&
+      isIndexWrite &&
+      idxEncodingValid &&
+      idxAddressValid &&
+      (selectedWeightBufferId === buffer.U)
+
+    val configBlocked =
+      configRequest &&
+      !io.indexUpdateSafe(buffer)
+
+    val writeBlocked =
+      writeRequest &&
+      !io.indexUpdateSafe(buffer)
+
+    when(configBlocked) {
+      blockedIndexConfigCycles(buffer) :=
+        blockedIndexConfigCycles(buffer) + 1.U
+    }
+
+    when(writeBlocked) {
+      blockedIndexWriteCycles(buffer) :=
+        blockedIndexWriteCycles(buffer) + 1.U
+    }
+
+    val configAccepted =
+      io.indexConfigWrite.valid &&
+      (io.indexConfigWrite.bits.weightBufferId === buffer.U)
+
+    val writeAccepted =
+      io.indexWrite.valid &&
+      (io.indexWrite.bits.weightBufferId === buffer.U)
+
+    when(configAccepted) {
+      assert(
+        io.indexUpdateSafe(buffer),
+        "PoTal same-buffer INDEX_CONFIG accepted while busy"
+      )
+
+      when(blockedIndexConfigCycles(buffer) =/= 0.U) {
+        printf(
+          p"[POTAL_INDEX_GUARD_RESUME] " +
+          p"buffer=${buffer.U} kind=CONFIG " +
+          p"blocked_cycles=${blockedIndexConfigCycles(buffer)}\n"
+        )
+      }
+
+      blockedIndexConfigCycles(buffer) := 0.U
+    }
+
+    when(writeAccepted) {
+      assert(
+        io.indexUpdateSafe(buffer),
+        "PoTal same-buffer INDEX_WRITE accepted while busy"
+      )
+
+      when(blockedIndexWriteCycles(buffer) =/= 0.U) {
+        printf(
+          p"[POTAL_INDEX_GUARD_RESUME] " +
+          p"buffer=${buffer.U} kind=WRITE " +
+          p"blocked_cycles=${blockedIndexWriteCycles(buffer)}\n"
+        )
+      }
+
+      blockedIndexWriteCycles(buffer) := 0.U
+    }
+  }
+
+
   // ----------------------------------------------------------
   // Response lifetime
   // ----------------------------------------------------------
