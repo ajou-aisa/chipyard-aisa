@@ -127,6 +127,13 @@ final class PoTalScaleCommandIngress(
     val releaseSafe = Input(Bool())
     val fenceDrained = Input(Bool())
 
+    // Index metadata may be updated independently for
+    // each resident Weight buffer.
+    //
+    // This does not change POTAL_FENCE or SCALE_RELEASE.
+    val indexUpdateSafe =
+      Input(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
     val indexWrite = Valid(new PoTalIndexWrite(indexEntries))
     val indexConfigWrite = Valid(new PoTalIndexConfig)
     val indexDescriptor = Output(new PoTalIndexConfig)
@@ -463,7 +470,10 @@ final class PoTalScaleCommandIngress(
           PoTalScaleCommandStatus.INVALID_ADDRESS
 
       }.otherwise {
-        io.cmd.ready := io.fenceDrained
+        // Target buffer is derived from the new B base.
+        // A busy target stalls without modifying metadata.
+        io.cmd.ready :=
+          io.indexUpdateSafe(configuredWeightBufferId)
       }
 
     }.elsewhen(isIndexWrite) {
@@ -479,7 +489,10 @@ final class PoTalScaleCommandIngress(
           PoTalScaleCommandStatus.INVALID_ADDRESS
 
       }.otherwise {
-        io.cmd.ready := io.fenceDrained
+        // INDEX_WRITE belongs to the last successfully
+        // configured Weight buffer.
+        io.cmd.ready :=
+          io.indexUpdateSafe(selectedWeightBufferId)
       }
 
     }.elsewhen(isFence) {

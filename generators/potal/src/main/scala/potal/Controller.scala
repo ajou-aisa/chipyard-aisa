@@ -434,11 +434,36 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   indexedLookupInExecute :=
     ex_controller.io.indexedTableLookupActive
 
-  // Index Table and Shared B Descriptor
+  // Dual Index Tables and buffer-specific update safety.
   potalIngressOpt match {
     case Some(ingress) =>
+
+      for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+        ingress.io.indexUpdateSafe(buffer) :=
+          !indexBufferBusy(buffer)
+      }
+
       ex_controller.io.potalIndexWrite := ingress.io.indexWrite
       ex_controller.io.potalIndexConfig := ingress.io.indexConfigWrite
+
+      // An accepted update must never target an active buffer.
+      when(ingress.io.indexConfigWrite.valid) {
+        assert(
+          !indexBufferBusy(
+            ingress.io.indexConfigWrite.bits.weightBufferId
+          ),
+          "PoTal INDEX_CONFIG targets active Weight buffer"
+        )
+      }
+
+      when(ingress.io.indexWrite.valid) {
+        assert(
+          !indexBufferBusy(
+            ingress.io.indexWrite.bits.weightBufferId
+          ),
+          "PoTal INDEX_WRITE targets active Weight buffer"
+        )
+      }
 
       reservation_station.io.potalIndexDescriptors :=
         ingress.io.indexDescriptors
@@ -781,6 +806,97 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       ingress.io.releaseSafe := allDrained
       ingress.io.fenceDrained := allDrained
   }
+
+  // ============================================================
+  // H2-2C: Physical evidence for cross-buffer Index updates.
+  //
+  // An update is counted only when the other Weight buffer
+  // is busy in the SAME clock cycle as the accepted command.
+  //
+  // Indexed lookup and Mesh SP input overlaps are measured
+  // independently; neither is assumed from a busy indication.
+  // ============================================================
+
+  if (enablePoTalSat32Acc && sp_banks >= 4) {
+    potalIngressOpt.foreach { ingress =>
+
+      for (peer <- 0 until PoTalProtocol.WeightBufferCount) {
+
+        val target = 1 - peer
+
+        val configAccepted =
+          ingress.io.indexConfigWrite.valid &&
+          (ingress.io.indexConfigWrite.bits.weightBufferId === target.U)
+
+        val writeAccepted =
+          ingress.io.indexWrite.valid &&
+          (ingress.io.indexWrite.bits.weightBufferId === target.U)
+
+        val updateAccepted = configAccepted || writeAccepted
+
+        val peerBusy = indexBufferBusy(peer)
+        val peerLookup = indexedLookupInExecute(peer)
+
+        val peerMeshInput =
+          ex_controller.io.meshSpadInputAccepted(2 * peer) ||
+          ex_controller.io.meshSpadInputAccepted(2 * peer + 1)
+
+        val crossUpdate = updateAccepted && peerBusy
+
+        val crossUpdates = RegInit(0.U(32.W))
+        val crossConfigs = RegInit(0.U(32.W))
+        val crossWrites = RegInit(0.U(32.W))
+        val crossLookups = RegInit(0.U(32.W))
+        val crossMeshInputs = RegInit(0.U(32.W))
+
+        when(crossUpdate) {
+          crossUpdates := crossUpdates + 1.U
+
+          when(configAccepted) {
+            crossConfigs := crossConfigs + 1.U
+          }
+
+          when(writeAccepted) {
+            crossWrites := crossWrites + 1.U
+          }
+
+          when(peerLookup) {
+            crossLookups := crossLookups + 1.U
+          }
+
+          when(peerMeshInput) {
+            crossMeshInputs := crossMeshInputs + 1.U
+          }
+
+          printf(
+            p"[POTAL_INDEX_UPDATE_OVERLAP] " +
+            p"peer=${peer.U} target=${target.U} " +
+            p"config=${configAccepted} write=${writeAccepted} " +
+            p"peer_lookup=${peerLookup} " +
+            p"peer_mesh_input=${peerMeshInput}\n"
+          )
+        }
+
+        // Global FENCE is a convenient reporting checkpoint.
+        // It retains its original whole-accelerator drain rule.
+        when(
+          ingress.io.cmd.fire &&
+          ingress.io.cmd.bits.funct === POTAL_FENCE
+        ) {
+          printf(
+            p"[POTAL_INDEX_UPDATE_SUMMARY] " +
+            p"peer=${peer.U} target=${target.U} " +
+            p"updates=${crossUpdates} " +
+            p"configs=${crossConfigs} " +
+            p"writes=${crossWrites} " +
+            p"lookup_overlap=${crossLookups} " +
+            p"mesh_input_overlap=${crossMeshInputs}\n"
+          )
+        }
+      }
+    }
+  }
+
 
   // ============================================================
   // Wire up global RoCC signals
