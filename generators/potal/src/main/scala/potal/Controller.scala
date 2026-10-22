@@ -732,6 +732,142 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   counters.io.event_io.connectEventSignal(CounterEvent.MAIN_ST_EX_CYCLES, incr_st_ex_cycles)
   counters.io.event_io.connectEventSignal(CounterEvent.MAIN_LD_ST_EX_CYCLES, incr_ld_st_ex_cycles)
 
+  // ------------------------------------------------------------
+  // PoTal physical Scratchpad / Mesh data-path overlap monitor.
+  //
+  // Pair 0: Scratchpad banks 0 and 1
+  // Pair 1: Scratchpad banks 2 and 3
+  //
+  // This measures accepted data transfers at the physical
+  // Scratchpad interfaces. It does not measure all internal
+  // systolic-array MAC-active cycles.
+  // ------------------------------------------------------------
+
+  if (enablePoTalSat32Acc && sp_banks >= 4) {
+
+    // Actual DMA writes to physical Scratchpad banks.
+    val dmaWritePair0 =
+      spad.module.io.dmaSpadWrite(0) ||
+      spad.module.io.dmaSpadWrite(1)
+
+    val dmaWritePair1 =
+      spad.module.io.dmaSpadWrite(2) ||
+      spad.module.io.dmaSpadWrite(3)
+
+    // Actual Scratchpad responses accepted by the Mesh input path.
+    val meshInputPair0 =
+      ex_controller.io.meshSpadInputAccepted(0) ||
+      ex_controller.io.meshSpadInputAccepted(1)
+
+    val meshInputPair1 =
+      ex_controller.io.meshSpadInputAccepted(2) ||
+      ex_controller.io.meshSpadInputAccepted(3)
+
+    // Both directions of ping-pong execution.
+    val pair0ComputePair1Prefetch =
+      meshInputPair0 && dmaWritePair1
+
+    val pair1ComputePair0Prefetch =
+      meshInputPair1 && dmaWritePair0
+
+    // Physical interface activity counters.
+    val dmaWritePair0Cycles = RegInit(0.U(32.W))
+    val dmaWritePair1Cycles = RegInit(0.U(32.W))
+
+    val meshInputPair0Cycles = RegInit(0.U(32.W))
+    val meshInputPair1Cycles = RegInit(0.U(32.W))
+
+    // Same-cycle cross-pair data-path overlap counters.
+    val pair0ComputePair1PrefetchCycles = RegInit(0.U(32.W))
+    val pair1ComputePair0PrefetchCycles = RegInit(0.U(32.W))
+
+    val totalCrossPairOverlapCycles = RegInit(0.U(32.W))
+
+    when(dmaWritePair0) {
+      dmaWritePair0Cycles := dmaWritePair0Cycles + 1.U
+    }
+
+    when(dmaWritePair1) {
+      dmaWritePair1Cycles := dmaWritePair1Cycles + 1.U
+    }
+
+    when(meshInputPair0) {
+      meshInputPair0Cycles := meshInputPair0Cycles + 1.U
+    }
+
+    when(meshInputPair1) {
+      meshInputPair1Cycles := meshInputPair1Cycles + 1.U
+    }
+
+    when(pair0ComputePair1Prefetch) {
+      pair0ComputePair1PrefetchCycles :=
+        pair0ComputePair1PrefetchCycles + 1.U
+    }
+
+    when(pair1ComputePair0Prefetch) {
+      pair1ComputePair0PrefetchCycles :=
+        pair1ComputePair0PrefetchCycles + 1.U
+    }
+
+    when(
+      pair0ComputePair1Prefetch ||
+      pair1ComputePair0Prefetch
+    ) {
+      totalCrossPairOverlapCycles :=
+        totalCrossPairOverlapCycles + 1.U
+    }
+
+    // Track whether the test exercised both bank pairs.
+    val pair0DmaObserved = RegInit(false.B)
+    val pair1DmaObserved = RegInit(false.B)
+
+    val pair0MeshObserved = RegInit(false.B)
+    val pair1MeshObserved = RegInit(false.B)
+
+    when(dmaWritePair0) {
+      pair0DmaObserved := true.B
+    }
+
+    when(dmaWritePair1) {
+      pair1DmaObserved := true.B
+    }
+
+    when(meshInputPair0) {
+      pair0MeshObserved := true.B
+    }
+
+    when(meshInputPair1) {
+      pair1MeshObserved := true.B
+    }
+
+    // Print once after both pairs have been exercised and
+    // all previously issued accelerator work has drained.
+    val overlapReportIssued = RegInit(false.B)
+
+    when(
+      pair0DmaObserved &&
+      pair1DmaObserved &&
+      pair0MeshObserved &&
+      pair1MeshObserved &&
+      olderGemminiDrained &&
+      !overlapReportIssued
+    ) {
+      printf(
+        p"[POTAL_DATA_OVERLAP] " +
+        p"dma_pair0_cycles=${dmaWritePair0Cycles} " +
+        p"dma_pair1_cycles=${dmaWritePair1Cycles} " +
+        p"mesh_pair0_cycles=${meshInputPair0Cycles} " +
+        p"mesh_pair1_cycles=${meshInputPair1Cycles} " +
+        p"pair0_compute_pair1_prefetch=${pair0ComputePair1PrefetchCycles} " +
+        p"pair1_compute_pair0_prefetch=${pair1ComputePair0PrefetchCycles} " +
+        p"total_overlap_cycles=${totalCrossPairOverlapCycles}\n"
+      )
+
+      overlapReportIssued := true.B
+    }
+  }
+
+
   // Issue commands to controllers
   // TODO we combinationally couple cmd.ready and cmd.valid signals here
   // when (compressed_cmd.valid) {

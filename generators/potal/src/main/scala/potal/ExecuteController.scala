@@ -46,6 +46,10 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     // W3-2c-3: classify raw ACC writes by Mesh tag.
     val potalRawWriteValid = Output(Vec(acc_banks, Bool()))
 
+    // Actual Scratchpad input acceptance by the Execute datapath.
+    // Indexed by physical Scratchpad bank.
+    val meshSpadInputAccepted = Output(Vec(sp_banks, Bool()))
+
     // Mesh-side completion of a PoTal PRELOAD.
     // This is not yet the final ROB completion.
     val potalMeshCompleted = Output(Valid(UInt(ROB_ID_WIDTH.W)))
@@ -969,6 +973,22 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
         io.srams.read(cntl.d_bank).resp.ready := !io.srams.read(cntl.d_bank).resp.bits.fromDMA
       }
     }
+  }
+
+  // ------------------------------------------------------------
+  // PoTal physical Scratchpad-to-Mesh input instrumentation.
+  //
+  // Scratchpad response ready is asserted by the ExecuteController
+  // only when the corresponding Mesh input handshake is accepted.
+  // Exclude DMA-origin responses.
+  // ------------------------------------------------------------
+
+  for (bank <- 0 until sp_banks) {
+    val spadResponse = io.srams.read(bank).resp
+
+    io.meshSpadInputAccepted(bank) :=
+      spadResponse.fire &&
+      !spadResponse.bits.fromDMA
   }
 
   if (!ex_read_from_acc) {

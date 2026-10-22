@@ -902,6 +902,121 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   assert(st_utilization >= io.st_completed, "st utilization underflow")
   assert(ex_utilization >= io.ex_completed, "ex utilization underflow")
 
+  // ------------------------------------------------------------
+  // PoTal loop scheduling overlap monitor.
+  // This observes command generators and the shared execute
+  // reservation-station occupancy, not physical DMA/PE activity.
+  // ------------------------------------------------------------
+
+  val monitorEnabled = RegInit(false.B)
+  val computeLoopId = Reg(UInt(log2Up(concurrent_loops).W))
+  val computePairId = Reg(UInt(2.W))
+
+  // Select the first PoTal loop, irrespective of bank pair.
+  val computeLoopSubmission =
+    !monitorEnabled &&
+    cmd.fire &&
+    (cmd.bits.cmd.inst.funct === LOOP_WS) &&
+    cmd.bits.cmd.rs1(20) &&
+    ((cmd.bits.cmd.rs1(19, 18) === 1.U) ||
+     (cmd.bits.cmd.rs1(19, 18) === 2.U))
+
+  when(computeLoopSubmission) {
+    monitorEnabled := true.B
+    computeLoopId := loop_being_configured_id
+    computePairId := cmd.bits.cmd.rs1(19, 18)
+  }
+
+  val computeLoopSelected =
+    monitorEnabled &&
+    (ex.io.loop_id === computeLoopId)
+
+  val nextLoopLoadASelected =
+    monitorEnabled &&
+    (ldA.io.loop_id =/= computeLoopId) &&
+    loops(ldA.io.loop_id).potalEnabled &&
+    (loops(ldA.io.loop_id).a_ex_spad_id =/= computePairId) &&
+    ((loops(ldA.io.loop_id).a_ex_spad_id === 1.U) ||
+     (loops(ldA.io.loop_id).a_ex_spad_id === 2.U))
+
+  val nextLoopLoadBSelected =
+    monitorEnabled &&
+    (ldB.io.loop_id =/= computeLoopId) &&
+    loops(ldB.io.loop_id).potalEnabled &&
+    (loops(ldB.io.loop_id).b_ex_spad_id =/= computePairId) &&
+    ((loops(ldB.io.loop_id).b_ex_spad_id === 1.U) ||
+     (loops(ldB.io.loop_id).b_ex_spad_id === 2.U))
+
+  val computeGeneratorBusy =
+    computeLoopSelected && !ex.io.idle
+
+  val nextLoopLoadGeneratorBusy =
+    (nextLoopLoadASelected && !ldA.io.idle) ||
+    (nextLoopLoadBSelected && !ldB.io.idle)
+
+  val computeCommandIssued =
+    computeLoopSelected && ex.io.cmd.fire
+
+  val nextLoopLoadCommandIssued =
+    (nextLoopLoadASelected && ldA.io.cmd.fire) ||
+    (nextLoopLoadBSelected && ldB.io.cmd.fire)
+
+  // The utilization counter is shared between loops.
+  // It cannot identify which bank pair owns outstanding work.
+  val anyExecuteOutstanding = ex_utilization =/= 0.U
+
+  val computeCommandsIssued = RegInit(0.U(32.W))
+  val nextLoopLoadCommandsIssued = RegInit(0.U(32.W))
+  val generatorOverlapCycles = RegInit(0.U(32.W))
+  val loadsIssuedDuringComputeGeneration = RegInit(0.U(32.W))
+  val loadsIssuedWithExecuteOutstanding = RegInit(0.U(32.W))
+
+  val nextLoopLoadObserved = RegInit(false.B)
+  val overlapReportIssued = RegInit(false.B)
+
+  when(computeCommandIssued) {
+    computeCommandsIssued := computeCommandsIssued + 1.U
+  }
+
+  when(nextLoopLoadCommandIssued) {
+    nextLoopLoadCommandsIssued := nextLoopLoadCommandsIssued + 1.U
+    nextLoopLoadObserved := true.B
+  }
+
+  when(computeGeneratorBusy && nextLoopLoadGeneratorBusy) {
+    generatorOverlapCycles := generatorOverlapCycles + 1.U
+  }
+
+  when(computeGeneratorBusy && nextLoopLoadCommandIssued) {
+    loadsIssuedDuringComputeGeneration :=
+      loadsIssuedDuringComputeGeneration + 1.U
+  }
+
+  when(anyExecuteOutstanding && nextLoopLoadCommandIssued) {
+    loadsIssuedWithExecuteOutstanding :=
+      loadsIssuedWithExecuteOutstanding + 1.U
+  }
+
+  // Report after the two loops finish, even if overlap was zero.
+  when(
+    monitorEnabled &&
+    nextLoopLoadObserved &&
+    !loop_configured &&
+    !cmd.valid &&
+    !overlapReportIssued
+  ) {
+    printf(
+      p"[POTAL_LOOP_OVERLAP] " +
+      p"compute_cmds=${computeCommandsIssued} " +
+      p"next_load_cmds=${nextLoopLoadCommandsIssued} " +
+      p"generator_overlap_cycles=${generatorOverlapCycles} " +
+      p"loads_during_compute_generation=${loadsIssuedDuringComputeGeneration} " +
+      p"loads_with_execute_outstanding=${loadsIssuedWithExecuteOutstanding}\n"
+    )
+    overlapReportIssued := true.B
+  }
+
+
   // Wire up unrolled command output
   val is_loop_run_cmd = cmd.bits.cmd.inst.funct === LOOP_WS
   val is_loop_config_cmd = cmd.bits.cmd.inst.funct >= LOOP_WS_CONFIG_BOUNDS && cmd.bits.cmd.inst.funct <= LOOP_WS_CONFIG_STRIDES_DC

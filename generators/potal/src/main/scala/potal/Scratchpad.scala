@@ -240,6 +240,9 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
       val tlb = Vec(2, new FrontendTLBIO)
 
       // Misc. ports
+      // Actual DRAM-to-SPAD writes, indexed by physical SPAD bank.
+      val dmaSpadWrite = Output(Vec(sp_banks, Bool()))
+
       val busy = Output(Bool())
       val flush = Input(Bool())
       val counter = new CounterEventIO()
@@ -528,6 +531,10 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
           zero_writer_pixel_repeater.io.resp.bits.laddr.sp_bank() === i.U &&
           // !((mvin_scale_out.valid && mvin_scale_out.bits.last) || (mvin_scale_acc_out.valid && mvin_scale_acc_out.bits.last))
           !((mvin_scale_pixel_repeater.io.resp.valid && mvin_scale_pixel_repeater.io.resp.bits.last) || (mvin_scale_acc_out.valid && mvin_scale_acc_out.bits.last))
+
+        // DMA data wins the physical SRAM write-port selection.
+        // Exclude zero-fill operations and ExecuteController writes.
+        io.dmaSpadWrite(i) := dmaread && !exwrite
 
         bio.write.en := exwrite || dmaread || zerowrite
 
