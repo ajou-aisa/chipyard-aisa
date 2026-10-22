@@ -286,7 +286,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     has_training_convs, has_max_pool, has_first_layer_optimizations, has_dw_convs) }
 
-  val (loop_cmd, loop_matmul_unroller_busy) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
+  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
     meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
@@ -295,6 +295,113 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
 
   val unrolled_cmd = Queue(loop_cmd)
   unrolled_cmd.ready := false.B
+
+  // H2-2C: Buffer-specific Indexed PRELOAD occupancy
+  // of the two-entry unrolled command queue.
+  val queuedIndexedPreloads =
+    RegInit(VecInit(
+      Seq.fill(PoTalProtocol.WeightBufferCount)(0.U(3.W))
+    ))
+
+  // Indexed LOOP_WS commands already accepted by LoopConv
+  // but not yet admitted into a LoopMatmul scheduler slot.
+  //
+  // This includes the internal queues of both LoopConv
+  // and LoopMatmul. Count both buffers independently.
+  val pendingIndexedLoopRuns =
+    RegInit(VecInit(
+      Seq.fill(PoTalProtocol.WeightBufferCount)(0.U(4.W))
+    ))
+
+  // Preliminary protection state.
+  // Do not use this to relax INDEX_CONFIG/WRITE yet:
+  // ExecuteController internal consumers must also be covered.
+  val indexBufferBusy =
+    Wire(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
+  // Routed after ExecuteController is instantiated.
+  val indexedLookupInExecute =
+    Wire(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+
+    // First acceptance into the LoopConv pipeline.
+    val rawIndexedLoopDispatch =
+      gemminiRawCmd.fire &&
+      (gemminiRawCmd.bits.cmd.inst.funct === LOOP_WS) &&
+      gemminiRawCmd.bits.cmd.rs1(63) &&
+      (gemminiRawCmd.bits.cmd.rs1(17, 16) === (buffer + 1).U)
+
+    // Final acceptance into a LoopMatmul scheduler slot.
+    val loopConfigured =
+      indexedLoopConfigured(buffer)
+
+    when(rawIndexedLoopDispatch && !loopConfigured) {
+      assert(
+        pendingIndexedLoopRuns(buffer) < 15.U,
+        "PoTal pending Indexed LOOP_WS overflow"
+      )
+
+      pendingIndexedLoopRuns(buffer) :=
+        pendingIndexedLoopRuns(buffer) + 1.U
+
+    }.elsewhen(loopConfigured && !rawIndexedLoopDispatch) {
+      assert(
+        pendingIndexedLoopRuns(buffer) =/= 0.U,
+        "PoTal pending Indexed LOOP_WS underflow"
+      )
+
+      pendingIndexedLoopRuns(buffer) :=
+        pendingIndexedLoopRuns(buffer) - 1.U
+    }
+
+    val enqIndexed =
+      loop_cmd.fire &&
+      (loop_cmd.bits.cmd.inst.funct === PRELOAD_CMD) &&
+      loop_cmd.bits.potal.valid &&
+      loop_cmd.bits.potal.indexedWeight &&
+      (loop_cmd.bits.potal.weightBufferId === buffer.U)
+
+    val deqIndexed =
+      unrolled_cmd.fire &&
+      (unrolled_cmd.bits.cmd.inst.funct === PRELOAD_CMD) &&
+      unrolled_cmd.bits.potal.valid &&
+      unrolled_cmd.bits.potal.indexedWeight &&
+      (unrolled_cmd.bits.potal.weightBufferId === buffer.U)
+
+    // Update occupancy only if enqueue/dequeue differ.
+    // Simultaneous enqueue/dequeue preserves the count.
+    when(enqIndexed && !deqIndexed) {
+      assert(
+        queuedIndexedPreloads(buffer) < 2.U,
+        "PoTal Indexed PRELOAD queue count overflow"
+      )
+
+      queuedIndexedPreloads(buffer) :=
+        queuedIndexedPreloads(buffer) + 1.U
+
+    }.elsewhen(deqIndexed && !enqIndexed) {
+      assert(
+        queuedIndexedPreloads(buffer) =/= 0.U,
+        "PoTal Indexed PRELOAD queue count underflow"
+      )
+
+      queuedIndexedPreloads(buffer) :=
+        queuedIndexedPreloads(buffer) - 1.U
+    }
+
+    indexBufferBusy(buffer) :=
+      indexedLoopActive(buffer) ||
+      (pendingIndexedLoopRuns(buffer) =/= 0.U) ||
+      rawIndexedLoopDispatch ||
+      (queuedIndexedPreloads(buffer) =/= 0.U) ||
+      enqIndexed ||
+      reservation_station.io.indexedPreloadOutstanding(buffer) ||
+      indexedLookupInExecute(buffer)
+  }
+
+  // Retain the preliminary state for RTL inspection.
+  dontTouch(indexBufferBusy)
   counters.io.event_io.connectEventSignal(CounterEvent.LOOP_MATMUL_ACTIVE_CYCLES, loop_matmul_unroller_busy)
 
   // Wire up controllers to ROB
@@ -322,6 +429,10 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val load_controller = withClock (gated_clock) { Module(new LoadController(outer.config, coreMaxAddrBits, local_addr_t)) }
   val store_controller = withClock (gated_clock) { Module(new StoreController(outer.config, coreMaxAddrBits, local_addr_t)) }
   val ex_controller = withClock (gated_clock) { Module(new ExecuteController(xLen, tagWidth, outer.config)) }
+
+  // H2-2C: Actual Index Table address-consumption activity.
+  indexedLookupInExecute :=
+    ex_controller.io.indexedTableLookupActive
 
   // Index Table and Shared B Descriptor
   potalIngressOpt match {

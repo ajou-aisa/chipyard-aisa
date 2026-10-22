@@ -57,6 +57,11 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     val potalIndexConfig = Flipped(Valid(new PoTalIndexConfig))   
 
  
+    // Indexed Weight address lookup currently active,
+    // independently for each resident Weight buffer.
+    val indexedTableLookupActive =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
     val busy = Output(Bool())
 
     val counter = new CounterEventIO()
@@ -530,7 +535,38 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     )
     assert(indexedSPRow < (sp_banks * sp_bank_entries).U, "Indexed SP address out of range")
     assert(!d_address_rs1.is_acc_addr, "Indexed Weight must be read from SP")
-}
+  }
+
+  // Protect the Index Table while it is being used to form
+  // the current Indexed Weight Scratchpad read address.
+  //
+  // Include cycles stalled by Scratchpad backpressure.
+  // Other buffers may be independently configured/written.
+  for (buffer <- 0 until weightBufferCount) {
+    val lookupActive =
+      indexedWeightRead &&
+      start_inputting_d &&
+      d_row_is_not_all_zeros &&
+      (indexedWeightBufferId === buffer.U)
+
+    io.indexedTableLookupActive(buffer) := lookupActive
+
+    when(io.potalIndexConfig.valid &&
+         io.potalIndexConfig.bits.weightBufferId === buffer.U) {
+      assert(
+        !lookupActive,
+        "PoTal INDEX_CONFIG overlaps active indexed Weight lookup"
+      )
+    }
+
+    when(io.potalIndexWrite.valid &&
+         io.potalIndexWrite.bits.weightBufferId === buffer.U) {
+      assert(
+        !lookupActive,
+        "PoTal INDEX_WRITE overlaps active indexed Weight lookup"
+      )
+    }
+  }
 
   val firing = start_inputting_a || start_inputting_b || start_inputting_d
 

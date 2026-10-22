@@ -834,6 +834,15 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     val st_completed = Input(UInt(log2Up(reservation_station_size+1).W))
     val ex_completed = Input(UInt(log2Up(reservation_station_size+1).W))
     val busy = Output(Bool())
+
+    // Indexed loops currently owned by either scheduler slot.
+    val indexedLoopActive =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
+    // One-cycle pulse when an Indexed LOOP_WS command
+    // enters a configured scheduler slot.
+    val indexedLoopConfigured =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
   })
 
   // Create states
@@ -845,6 +854,19 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   val tail_loop = loops(tail_loop_id)
 
   val loop_configured = loops.map(_.configured).reduce(_ || _)
+
+  // A configured Indexed Loop protects its Weight buffer until
+  // the scheduler slot has finished all of its commands.
+  //
+  // b_ex_spad_id 1 -> Weight Buffer 0 (Bank 1)
+  // b_ex_spad_id 2 -> Weight Buffer 1 (Bank 3)
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+    io.indexedLoopActive(buffer) := loops.map { loop =>
+      loop.configured &&
+      loop.potalIndexedWeight &&
+      (loop.b_ex_spad_id === (buffer + 1).U)
+    }.reduce(_ || _)
+  }
 
   val loop_being_configured_id = Mux(head_loop.configured, tail_loop_id, head_loop_id)
   val loop_being_configured = loops(loop_being_configured_id)
@@ -1019,6 +1041,16 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   // Wire up unrolled command output
   val is_loop_run_cmd = cmd.bits.cmd.inst.funct === LOOP_WS
+
+  // This handshake is the exact point at which LOOP_WS
+  // transfers from the internal FIFO to a scheduler slot.
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+    io.indexedLoopConfigured(buffer) :=
+      cmd.fire &&
+      is_loop_run_cmd &&
+      cmd.bits.cmd.rs1(63) &&
+      (cmd.bits.cmd.rs1(17, 16) === (buffer + 1).U)
+  }
   val is_loop_config_cmd = cmd.bits.cmd.inst.funct >= LOOP_WS_CONFIG_BOUNDS && cmd.bits.cmd.inst.funct <= LOOP_WS_CONFIG_STRIDES_DC
   val is_loop_cmd = is_loop_run_cmd || is_loop_config_cmd
 
@@ -1462,7 +1494,7 @@ object LoopMatmul {
             max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
             mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
             compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int)
-           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool) = {
+           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool]) = {
     val mod = Module(new LoopMatmul(block_size, coreMaxAddrBits, rob_size, max_lds, max_exs, max_sts,
       max_addr, max_acc_addr, input_w, acc_w, dma_max_bytes,
       mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries))
@@ -1470,7 +1502,12 @@ object LoopMatmul {
     mod.io.ld_completed := ld_completed
     mod.io.st_completed := st_completed
     mod.io.ex_completed := ex_completed
-    (mod.io.out, mod.io.busy)
+    (
+      mod.io.out,
+      mod.io.busy,
+      mod.io.indexedLoopActive,
+      mod.io.indexedLoopConfigured
+    )
   }
 
   def castDramOffset(dram_offset: UInt): UInt = {

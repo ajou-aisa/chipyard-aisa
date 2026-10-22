@@ -55,6 +55,11 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     // Unlike busy, this is true only when every reservation-station entry has been retired.
     val drained = Output(Bool())
+
+    // Indexed PRELOADs waiting in the Execute reservation station.
+    // Includes issued commands not yet completed.
+    val indexedPreloadOutstanding =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
     // Independent descriptors for resident Weight buffers.
     val potalIndexDescriptors =
       Input(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
@@ -138,6 +143,22 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
   val empty = !entries.map(_.valid).reduce(_ || _)
   io.drained := empty
+
+  // Track outstanding Indexed PRELOADs separately for each
+  // resident Weight buffer.
+  //
+  // Reservation Station entries remain valid until completion.
+  // This does not cover commands still inside LoopMatmul.
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+    io.indexedPreloadOutstanding(buffer) :=
+      entries_ex.map { entry =>
+        entry.valid &&
+        (entry.bits.cmd.cmd.inst.funct === PRELOAD_CMD) &&
+        entry.bits.cmd.potal.valid &&
+        entry.bits.cmd.potal.indexedWeight &&
+        (entry.bits.cmd.potal.weightBufferId === buffer.U)
+      }.reduce(_ || _)
+  }
 
   val full = entries.map(_.valid).reduce(_ && _)
 
