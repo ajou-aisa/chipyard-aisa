@@ -179,7 +179,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val potalIndexedPreload = indexedPreloadMeta.valid && indexedPreloadMeta.indexedWeight
 
   // Select the Index Table associated with this PRELOAD.
-  val indexedWeightBufferId = indexedPreloadMeta.weightBufferId
+  val indexedWeightBufferId = Wire(UInt(PoTalProtocol.WeightBufferIdWidth.W))
+  indexedWeightBufferId := indexedPreloadMeta.weightBufferId
 
   val selectedIndexDescriptor =
     indexDescriptors(indexedWeightBufferId)
@@ -1127,6 +1128,28 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     mesh.io.a.bits := Mux(a_should_be_fed_into_transposer, 0.U, dataA.asUInt).asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
     mesh.io.b.bits := Mux(b_should_be_fed_into_transposer, 0.U, dataB.asUInt).asTypeOf(Vec(meshColumns, Vec(tileColumns, inputType)))
     mesh.io.req.bits.tag.addr.make_this_garbage()
+  }
+
+  // H3-5A simulation trace: correlate accepted requests and responses by cycle and bank.
+  val indexedTraceEnable = freechips.rocketchip.util.PlusArg("potal_index_trace", 0) =/= 0.U
+  val indexedTraceCycle = RegInit(0.U(64.W))
+  indexedTraceCycle := indexedTraceCycle + 1.U
+  when(indexedTraceEnable) {
+    when(computing && indexedWeightRead) {
+      printf(p"[H3_EX] t=${indexedTraceCycle} meta=${Hexadecimal(indexedPreloadMeta.asUInt)} buffer=${indexedWeightBufferId} kt=${indexedPreloadMeta.indexedKTile} jt=${indexedPreloadMeta.indexedJTile} dc=${d_fire_counter} row=${d_logical_row} slot=${indexSlotWide} source=${absoluteSourceK} sp=${indexedSPRow} bank=${dataDbank} addr=${d_address.sp_row()} dv=${d_valid} dr=${d_ready} df=${d_fire} cqready=${cntl_ready} enq=${mesh_cntl_signals_q.io.enq.fire}\n")
+    }
+    for (bank <- 0 until sp_banks) {
+      val port = io.srams.read(bank)
+      when(port.req.valid) {
+        printf(p"[H3_REQ] t=${indexedTraceCycle} bank=${bank.U} v=${port.req.valid} r=${port.req.ready} addr=${port.req.bits.addr} dma=${port.req.bits.fromDMA}\n")
+      }
+      when(port.resp.valid) {
+        printf(p"[H3_RESP] t=${indexedTraceCycle} bank=${bank.U} v=${port.resp.valid} r=${port.resp.ready} dma=${port.resp.bits.fromDMA} data=${Hexadecimal(port.resp.bits.data)}\n")
+      }
+    }
+    when(cntl_valid && cntl.d_fire) {
+      printf(p"[H3_MESH] t=${indexedTraceCycle} bank=${cntl.d_bank} garbage=${cntl.d_garbage} v=${mesh.io.d.valid} r=${mesh.io.d.ready} deq=${mesh_cntl_signals_q.io.deq.fire} reqv=${mesh.io.req.valid} reqr=${mesh.io.req.ready} caddr=${Hexadecimal(cntl.c_addr.asUInt)} data=${Hexadecimal(mesh.io.d.bits.asUInt)}\n")
+    }
   }
 
   // Scratchpad writes
