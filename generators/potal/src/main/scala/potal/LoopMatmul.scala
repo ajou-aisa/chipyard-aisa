@@ -1112,6 +1112,10 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     }
   }
 
+  when(freechips.rocketchip.util.PlusArg("potal_index_trace", 0) =/= 0.U && potalExPreload && io.out.fire) {
+    printf(p"[H3_LOOP] loop=${ex.io.loop_id} i=${ex.io.i} kt=${ex.io.k} jt=${ex.io.j} meta=${Hexadecimal(io.out.bits.potal.asUInt)} rs1=${Hexadecimal(io.out.bits.cmd.rs1)} rs2=${Hexadecimal(io.out.bits.cmd.rs2)}\n")
+  }
+
   cmd.ready := Mux(is_loop_cmd, !loop_being_configured.configured, !loop_configured && io.out.ready)
   arb.io.out.ready := io.out.ready
 

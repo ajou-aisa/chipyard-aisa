@@ -294,6 +294,10 @@ class FireSimQuadRocketSingleGemminiConfig extends Config(
   new freechips.rocketchip.subsystem.WithNBigCores(3) ++
   new FireSimLeanGemminiRocketConfig)
 
+class FireSimQuadRocketQuadGemminiConfig extends Config(
+  new freechips.rocketchip.subsystem.WithNBigCores(3) ++
+  new FireSimLeanGemminiRocketConfig)
+
 class FireSimOctaRocketSingleGemminiConfig extends Config(
   new chipyard.config.WithMultiRoCC ++
   new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
