@@ -349,6 +349,9 @@ class LoopMatmulExecuteReq(val block_size: Int, val coreMaxAddrBits: Int, val it
   val a_addr_start = UInt(log2Up(max_addr).W)
   val b_addr_end = UInt(log2Up(max_addr+1).W)
   val c_addr_start = UInt(log2Up(max_acc_addr).W)
+  val resident = Bool()
+  val resident_b_base = UInt(16.W)
+  val resident_b_pitch = UInt(16.W)
   val loop_id = UInt(log2Up(concurrent_loops).W)
   val skip = Bool()
 }
@@ -420,7 +423,9 @@ class LoopMatmulExecute(block_size: Int, coreMaxAddrBits: Int, iterator_bitwidth
   val b_max_col = Mux(req.b_tranpose, req.max_k, req.max_j)
 
   val a_addr = req.a_addr_start + (a_row * a_max_col + a_col) * block_size.U
-  val b_addr = b_addr_start + (b_row * b_max_col + b_col) * block_size.U
+  val b_addr = Mux(req.resident,
+    req.resident_b_base +& (k * req.resident_b_pitch) +& (j * block_size.U),
+    b_addr_start + (b_row * b_max_col + b_col) * block_size.U)
   val c_addr = c_addr_start + (i * req.max_j + j) * block_size.U
 
   val a_cols = block_size.U - Mux(k === req.max_k - 1.U, req.pad_k, 0.U)
@@ -759,6 +764,11 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
   val potalPairedResidual = Bool()
   val potalIndexedWeight = Bool()
 
+  val residentView = new PoTalResidentView
+  val residentStaged = Bool()
+  val residentActive = Bool()
+  val configComplete = UInt(5.W)
+
   // H2-2B1: bank-local A offset measured in DIM-row tiles.
   val potalAOffsetTiles = UInt(log2Up(max_addr).W)
 
@@ -799,6 +809,10 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
     potalPairedResidual := false.B
     potalIndexedWeight := false.B
     potalAOffsetTiles := 0.U
+    residentView := 0.U.asTypeOf(new PoTalResidentView)
+    residentStaged := false.B
+    residentActive := false.B
+    configComplete := 0.U
 
     running := false.B
 
@@ -821,7 +835,8 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
 class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size: Int, max_lds: Int, max_exs: Int, max_sts: Int,
                  max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
                  mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
-                 compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int)
+                 compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int,
+                 residentViewSupported: Boolean = false)
                 (implicit p: Parameters) extends Module {
   val iterator_bitwidth = 16
   val max_block_len = (dma_max_bytes / (block_size * input_w / 8)) max 1
@@ -834,6 +849,9 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     val st_completed = Input(UInt(log2Up(reservation_station_size+1).W))
     val ex_completed = Input(UInt(log2Up(reservation_station_size+1).W))
     val busy = Output(Bool())
+    val resp = Decoupled(new PoTalScaleCommandResponse)
+    val indexDescriptors = Input(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
+    val indexComplete = Input(Vec(PoTalProtocol.WeightBufferCount, Bool()))
 
     // Indexed loops currently owned by either scheduler slot.
     val indexedLoopActive =
@@ -841,6 +859,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
     // One-cycle pulse when an Indexed LOOP_WS command
     // enters a configured scheduler slot.
+    // This is a consumed-run pulse, including refused extended runs.
+    // Controller must cancel raw-dispatch ownership even on refusal.
     val indexedLoopConfigured =
       Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
   })
@@ -848,7 +868,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   // Create states
   val concurrent_loops = 2
   val loops = Reg(Vec(concurrent_loops, new LoopMatmulState(iterator_bitwidth, coreMaxAddrBits, max_addr, max_acc_addr)))
-  val head_loop_id = Reg(UInt(log2Up(concurrent_loops).W))
+  val head_loop_id = RegInit(0.U(log2Up(concurrent_loops).W))
   val tail_loop_id = (~head_loop_id).asUInt // This is the loop that we always try to configure if available
   val head_loop = loops(head_loop_id)
   val tail_loop = loops(tail_loop_id)
@@ -884,7 +904,15 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   // Create command queue
   val cmd = Queue(io.in)
 
-  io.busy := cmd.valid || loop_configured
+  val responsePending = RegInit(false.B)
+  val response = Reg(new PoTalScaleCommandResponse)
+  io.resp.valid := responsePending
+  io.resp.bits := response
+  when(io.resp.fire) {
+    responsePending := false.B
+  }
+
+  io.busy := cmd.valid || loop_configured || responsePending
 
   // Create ld arbiters
   val ldab_arb = Module(new WeightedArbiter(new RoCCCommand(), maxWeightA=255, staticWeightAEnabled=true)) // TODO magic numbers
@@ -1041,6 +1069,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   // Wire up unrolled command output
   val is_loop_run_cmd = cmd.bits.cmd.inst.funct === LOOP_WS
+  val is_resident_config_cmd = cmd.bits.cmd.inst.funct === POTAL_RESIDENT_VIEW
+  val extended_run = is_loop_run_cmd && cmd.bits.cmd.rs1(3)
 
   // This handshake is the exact point at which LOOP_WS
   // transfers from the internal FIFO to a scheduler slot.
@@ -1052,14 +1082,14 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       (cmd.bits.cmd.rs1(17, 16) === (buffer + 1).U)
   }
   val is_loop_config_cmd = cmd.bits.cmd.inst.funct >= LOOP_WS_CONFIG_BOUNDS && cmd.bits.cmd.inst.funct <= LOOP_WS_CONFIG_STRIDES_DC
-  val is_loop_cmd = is_loop_run_cmd || is_loop_config_cmd
+  val is_loop_cmd = is_loop_run_cmd || is_loop_config_cmd || is_resident_config_cmd
 
   io.out.bits.cmd := Mux(loop_configured, unrolled_cmd.bits, cmd.bits.cmd)
   io.out.bits.cmd.status := cmd.bits.cmd.status // TODO This is not guaranteed to be the correct fix! We must fix this
   io.out.bits.rob_id := DontCare
   io.out.bits.from_matmul_fsm := Mux(loop_configured, true.B, cmd.bits.from_matmul_fsm)
   io.out.bits.from_conv_fsm := Mux(loop_configured, false.B, cmd.bits.from_conv_fsm)
-  io.out.valid := Mux(loop_configured, unrolled_cmd.valid, cmd.valid && !is_loop_config_cmd && !is_loop_run_cmd)
+  io.out.valid := Mux(loop_configured, unrolled_cmd.valid, cmd.valid && !is_loop_cmd && !responsePending)
   
   // PoTal K32 metadata generation
   // Default: forward original metadata for non-loop commands.
@@ -1089,7 +1119,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       Mux(potalExLoop.b_ex_spad_id === 2.U, 1.U, 0.U)
 
     io.out.bits.potal.indexedKTile := ex.io.k
-    io.out.bits.potal.indexedJTile := ex.io.j
+    io.out.bits.potal.indexedJTile := ex.io.j +
+      Mux(potalExLoop.residentActive, potalExLoop.residentView.jOrigin, 0.U)
 
     // Runtime-configured scale block index.
     // Provided by LoopMatmulExecute.
@@ -1116,8 +1147,102 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     printf(p"[H3_LOOP] loop=${ex.io.loop_id} i=${ex.io.i} kt=${ex.io.k} jt=${ex.io.j} meta=${Hexadecimal(io.out.bits.potal.asUInt)} rs1=${Hexadecimal(io.out.bits.cmd.rs1)} rs2=${Hexadecimal(io.out.bits.cmd.rs2)}\n")
   }
 
-  cmd.ready := Mux(is_loop_cmd, !loop_being_configured.configured, !loop_configured && io.out.ready)
+  cmd.ready := !responsePending &&
+    Mux(is_loop_cmd, !loop_being_configured.configured, !loop_configured && io.out.ready)
   arb.io.out.ready := io.out.ready
+
+  // A malformed xd=0 extension is consumed without effects or an unsolicited
+  // destination-register write. Canonical extended commands always use xd=1.
+  val view = Wire(new PoTalResidentView)
+  view.bBase := cmd.bits.cmd.rs1(15, 0)
+  view.bPitch := cmd.bits.cmd.rs1(31, 16)
+  view.jOrigin := cmd.bits.cmd.rs1(47, 32)
+  view.accBase := cmd.bits.cmd.rs1(63, 48)
+  view.pair := cmd.bits.cmd.rs2(1)
+  view.indexed := cmd.bits.cmd.rs2(2)
+  view.accBank := cmd.bits.cmd.rs2(3)
+  val viewDisabled = cmd.bits.cmd.rs1 === 0.U && cmd.bits.cmd.rs2 === 0.U
+  val viewEncoding = cmd.bits.cmd.inst.xd && !cmd.bits.cmd.rs2(63, 8).orR &&
+    (cmd.bits.cmd.rs2(0) || viewDisabled) &&
+    (view.indexed || view.jOrigin === 0.U)
+  val viewMode = residentViewSupported.B && cmd.bits.cmd.rs2(7, 4) === 1.U
+  val viewBankStart = Mux(view.pair, 12288.U, 4096.U)
+  val viewBankEnd = Mux(view.pair, 16384.U, 8192.U)
+  val viewAddress = !view.bBase(3, 0).orR && !view.bPitch(3, 0).orR &&
+    !view.accBase(3, 0).orR && view.bPitch =/= 0.U && view.bPitch <= 144.U &&
+    (view.jOrigin * 16.U) < view.bPitch &&
+    view.bBase >= viewBankStart && (view.bBase +& 16.U) <= viewBankEnd &&
+    view.accBase < 512.U
+  val viewStatus = Mux(!viewEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
+    Mux(viewDisabled, PoTalScaleCommandStatus.OK,
+      Mux(!viewMode, PoTalScaleCommandStatus.BAD_COMMAND,
+        Mux(!viewAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK))))
+
+  val staged = loop_being_configured.residentView
+  // Materialize the selector before dynamic accesses (legacy FIRRTL lowering).
+  val indexBuffer = Wire(UInt(PoTalProtocol.WeightBufferIdWidth.W))
+  indexBuffer := staged.pair
+  val indexDescriptor = io.indexDescriptors(indexBuffer)
+  val maxI = loop_being_configured.max_i
+  val maxJ = loop_being_configured.max_j
+  val maxK = loop_being_configured.max_k
+  val selectedPair = staged.pair.asUInt +& 1.U
+  val runEncoding = cmd.bits.cmd.inst.xd &&
+    loop_being_configured.residentStaged && loop_being_configured.configComplete.andR &&
+    !cmd.bits.cmd.rs1(15, 4).orR && !cmd.bits.cmd.rs1(2) &&
+    !cmd.bits.cmd.rs2(63, 32).orR &&
+    cmd.bits.cmd.rs1(20) && cmd.bits.cmd.rs1(61) &&
+    cmd.bits.cmd.rs1(19, 18) === selectedPair &&
+    cmd.bits.cmd.rs1(17, 16) === selectedPair &&
+    cmd.bits.cmd.rs1(63) === staged.indexed &&
+    cmd.bits.cmd.rs1(62) === staged.accBank &&
+    (!staged.accBank || staged.indexed) &&
+    cmd.bits.cmd.rs1(60, 45) === 1.U &&
+    !cmd.bits.cmd.rs2(2, 0).orR
+  val bankEnd = Mux(staged.pair, 16384.U, 8192.U)
+  val nativeEnd = staged.bBase +& ((maxK - 1.U) * staged.bPitch) +& (maxJ * 16.U)
+  val indexRows = maxK * 16.U - loop_being_configured.pad_k
+  val indexedAddress = io.indexComplete(indexBuffer) &&
+    indexDescriptor.weightBufferId === indexBuffer &&
+    indexDescriptor.bBase === staged.bBase &&
+    (indexDescriptor.jTiles * 16.U) === staged.bPitch &&
+    (staged.jOrigin +& maxJ) <= indexDescriptor.jTiles &&
+    indexRows > 0.U && indexRows <= indexDescriptor.activeRows && indexRows <= 32.U
+  val runAddress = maxI === 1.U && maxJ > 0.U && maxJ <= 9.U &&
+    maxK > 0.U && maxK <= 28.U &&
+    loop_being_configured.pad_i < 16.U && loop_being_configured.pad_j < 16.U &&
+    loop_being_configured.pad_k < 16.U &&
+    loop_being_configured.a_dram_addr =/= 0.U &&
+    loop_being_configured.b_dram_addr === 0.U &&
+    loop_being_configured.d_dram_addr === 0.U &&
+    loop_being_configured.c_dram_addr === 0.U &&
+    ((cmd.bits.cmd.rs2(31, 3) +& maxK) * 16.U) <= 4096.U &&
+    (staged.accBase +& (maxJ * 16.U)) <= 512.U &&
+    (cmd.bits.cmd.rs1(36, 21) +& (maxK * maxJ)) <= scaleEntries.U &&
+    Mux(staged.indexed, indexedAddress,
+      (maxJ * 16.U) <= staged.bPitch && nativeEnd <= bankEnd)
+  val runStatus = Mux(!residentViewSupported.B, PoTalScaleCommandStatus.BAD_COMMAND,
+    Mux(!runEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
+      Mux(!runAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK)))
+  val runAccepted = !extended_run || runStatus === PoTalScaleCommandStatus.OK
+
+  when(cmd.fire && (is_resident_config_cmd || extended_run) && cmd.bits.cmd.inst.xd) {
+    responsePending := true.B
+    response.rd := cmd.bits.cmd.inst.rd
+    response.status := Mux(is_resident_config_cmd, viewStatus, runStatus)
+  }
+
+  // Ordered TLB FLUSH invalidates only staged transactions. It is not a drain
+  // and must not clear Index ownership, active snapshots, Scale, or Work.
+  when(cmd.fire && cmd.bits.cmd.inst.funct === FLUSH_CMD) {
+    loops.foreach { loop =>
+      loop.residentStaged := false.B
+      loop.configComplete := 0.U
+      when(!loop.configured) {
+        loop.residentView := 0.U.asTypeOf(new PoTalResidentView)
+      }
+    }
+  }
 
   // Wire up overloaded signals
   ldA.io.rob_overloaded := ld_utilization >= max_lds.U
@@ -1155,7 +1280,26 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   dontTouch(loops_configured)
 
   // Create config registers
-  when(cmd.valid && is_loop_cmd && !loop_being_configured.configured) {
+  when(cmd.fire && is_loop_cmd) {
+
+    when(is_loop_config_cmd) {
+      loop_being_configured.configComplete := loop_being_configured.configComplete |
+        UIntToOH(cmd.bits.cmd.inst.funct - LOOP_WS_CONFIG_BOUNDS, 5)
+    }
+
+    when(is_resident_config_cmd) {
+      // A rejected overwrite invalidates the older staged descriptor.
+      loop_being_configured.residentStaged :=
+        viewStatus === PoTalScaleCommandStatus.OK && !viewDisabled
+      loop_being_configured.residentView :=
+        Mux(viewStatus === PoTalScaleCommandStatus.OK && !viewDisabled,
+          view, 0.U.asTypeOf(new PoTalResidentView))
+    }
+
+    when(is_loop_run_cmd) {
+      loop_being_configured.residentStaged := false.B
+      loop_being_configured.configComplete := 0.U
+    }
 
     switch (cmd.bits.cmd.inst.funct) {
       is (LOOP_WS_CONFIG_BOUNDS) {
@@ -1189,121 +1333,124 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       }
 
       is (LOOP_WS) {
-        loop_being_configured.ex_accumulate := cmd.bits.cmd.rs1(0)
-        loop_being_configured.full_c := cmd.bits.cmd.rs1(1)
-        loop_being_configured.low_d := cmd.bits.cmd.rs1(2)
-        loop_being_configured.act := cmd.bits.cmd.rs1(8+Activation.bitwidth-1, 8) // TODO magic numbers
+        when(runAccepted) {
+          loop_being_configured.residentActive := extended_run
+          loop_being_configured.ex_accumulate := cmd.bits.cmd.rs1(0)
+          loop_being_configured.full_c := cmd.bits.cmd.rs1(1)
+          loop_being_configured.low_d := cmd.bits.cmd.rs1(2)
+          loop_being_configured.act := cmd.bits.cmd.rs1(8+Activation.bitwidth-1, 8) // TODO magic numbers
 
-        loop_being_configured.a_ex_spad_id := cmd.bits.cmd.rs1(19, 18)
-        loop_being_configured.b_ex_spad_id := cmd.bits.cmd.rs1(17, 16) 
-        loop_being_configured.a_transpose := cmd.bits.cmd.rs2(0)
-        loop_being_configured.b_transpose := cmd.bits.cmd.rs2(1)
-        is_resadd := cmd.bits.cmd.rs2(2)
+          loop_being_configured.a_ex_spad_id := cmd.bits.cmd.rs1(19, 18)
+          loop_being_configured.b_ex_spad_id := cmd.bits.cmd.rs1(17, 16)
+          loop_being_configured.a_transpose := cmd.bits.cmd.rs2(0)
+          loop_being_configured.b_transpose := cmd.bits.cmd.rs2(1)
+          is_resadd := cmd.bits.cmd.rs2(2)
 
-        // PoTal LOOP_WS scale configuration
-        // rs1[20]    : nable
-        // rs1[36:21] : scaleBase
-        // rs1[44:37] : scaleGeneration
-        // rs1[60:45] : passesPerBlock 
-        val potalEnable = cmd.bits.cmd.rs1(20)
+          // PoTal LOOP_WS scale configuration
+          // rs1[20]    : nable
+          // rs1[36:21] : scaleBase
+          // rs1[44:37] : scaleGeneration
+          // rs1[60:45] : passesPerBlock
+          val potalEnable = cmd.bits.cmd.rs1(20)
 
-        // H2-2B1: LOOP_WS rs2[31:3] gives the A offset within
-        // the selected bank in units of block_size Scratchpad rows.
-        val aOffsetTiles = cmd.bits.cmd.rs2(31, 3)
-        loop_being_configured.potalAOffsetTiles :=
-          Mux(potalEnable, aOffsetTiles, 0.U)
+          // H2-2B1: LOOP_WS rs2[31:3] gives the A offset within
+          // the selected bank in units of block_size Scratchpad rows.
+          val aOffsetTiles = cmd.bits.cmd.rs2(31, 3)
+          loop_being_configured.potalAOffsetTiles :=
+            Mux(potalEnable, aOffsetTiles, 0.U)
 
-        // Each selected pair contains one A bank and one B bank.
-        // Preserve legacy behavior when the offset is zero.
-        when (potalEnable && (aOffsetTiles =/= 0.U)) {
-          val aFootprintTiles =
-            loop_being_configured.max_i * loop_being_configured.max_k
-          val aBankCapacityTiles =
-            max_addr / (2 * concurrent_loops * block_size)
+          // Each selected pair contains one A bank and one B bank.
+          // Preserve legacy behavior when the offset is zero.
+          when (potalEnable && (aOffsetTiles =/= 0.U)) {
+            val aFootprintTiles =
+              loop_being_configured.max_i * loop_being_configured.max_k
+            val aBankCapacityTiles =
+              max_addr / (2 * concurrent_loops * block_size)
 
-          assert(
-            (aOffsetTiles +& aFootprintTiles) <= aBankCapacityTiles.U,
-            "PoTal: A bank-local offset and A footprint exceed one A bank"
-          )
-          assert(
-            (cmd.bits.cmd.rs1(19, 18) === 1.U) ||
-            (cmd.bits.cmd.rs1(19, 18) === 2.U),
-            "PoTal: nonzero A offset requires bank pair selector 1 or 2"
-          )
+            assert(
+              (aOffsetTiles +& aFootprintTiles) <= aBankCapacityTiles.U,
+              "PoTal: A bank-local offset and A footprint exceed one A bank"
+            )
+            assert(
+              (cmd.bits.cmd.rs1(19, 18) === 1.U) ||
+              (cmd.bits.cmd.rs1(19, 18) === 2.U),
+              "PoTal: nonzero A offset requires bank pair selector 1 or 2"
+            )
+          }
+
+          // LOOP_WS
+          val pairedAcc = cmd.bits.cmd.rs1(61)
+          val pairedResidual = cmd.bits.cmd.rs1(62)
+          val indexedWeight = cmd.bits.cmd.rs1(63)
+
+          loop_being_configured.potalPairedAcc := potalEnable && pairedAcc
+
+          loop_being_configured.potalPairedResidual := potalEnable && pairedAcc && pairedResidual
+          loop_being_configured.potalIndexedWeight := indexedWeight &&
+                                                      potalEnable &&
+                                                      pairedAcc &&
+                                                      (pairedResidual || extended_run)
+
+          when(indexedWeight) {
+            assert(potalEnable && pairedAcc && (pairedResidual || extended_run), "PoTal indexed Weight requires paired residual mode")
+            assert(loop_being_configured.b_dram_addr === 0.U, "Indexed Weight must reuse resident B without DMA")
+
+            // Indexed Weight must select one of the two physical bank pairs.
+            val weightBankPair = cmd.bits.cmd.rs1(17, 16)
+
+            assert(
+              weightBankPair === 1.U || weightBankPair === 2.U,
+              "PoTal indexed Weight requires bank pair 1 or 2"
+            )
+          }
+
+
+          when(pairedAcc || pairedResidual) {
+            assert(potalEnable, "PoTal paired ACC requires PoTal mode")
+            assert(pairedAcc, "PoTal residual path requires paired ACC mode")
+            assert(loop_being_configured.d_dram_addr === 0.U, "PoTal paired ACC probe does not support D")
+            assert((loop_being_configured.max_i * loop_being_configured.max_j * block_size.U) <= (max_acc_addr / 2).U,
+                    "PoTal paired ACC exceeds one bank")
+          }
+
+          val scaleBase = cmd.bits.cmd.rs1(36, 21)
+          val passesPerBlock = cmd.bits.cmd.rs1(60, 45)
+
+          loop_being_configured.potalEnabled := potalEnable
+          loop_being_configured.potalScaleBase := scaleBase
+          loop_being_configured.potalScaleGeneration := cmd.bits.cmd.rs1(44, 37)
+          loop_being_configured.potalPassesPerBlock := Mux(potalEnable, passesPerBlock, 1.U)
+
+          when(potalEnable) {
+            val maxI = loop_being_configured.max_i
+            val maxJ = loop_being_configured.max_j
+            val maxK = loop_being_configured.max_k
+
+            val outputTiles = maxI * maxJ
+
+            // CPU already checked:
+            // scaleBlockK >= DIM
+            // scaleBlockK % DIM == 0
+            //
+            // So the encoded ratio must be nonzero.
+            assert(passesPerBlock =/= 0.U, "PoTal: passesPerBlock must be positive")
+            assert(maxI > 0.U && maxJ > 0.U && maxK > 0.U, "PoTal: invalid dimensions")
+            assert(outputTiles <= PoTalProtocol.WorkIdsPerLoop.U, "PoTal: work ID capacity exceeded")
+            assert(scaleBase <= scaleEntries.U, "PoTal: invalid scale base")
+
+            // At least the first N-tile scale block
+            // must fit in the selected scale window
+            assert(maxJ <= (scaleEntries.U - scaleBase), "PoTal: first scale block exceeds cache")
+            assert(loop_being_configured.pad_i < block_size.U &&
+                   loop_being_configured.pad_j < block_size.U &&
+                   loop_being_configured.pad_k < block_size.U, "PoTal: invalid padding")
+            assert(cmd.bits.cmd.rs2(2) === 0.U &&
+                   cmd.bits.cmd.rs2(1, 0) === 0.U, "PoTal: transpose/resadd unsupported")
+          }
+          loop_being_configured.configured := true.B
+
+          loops_configured := loops_configured + 1.U
         }
-
-        // LOOP_WS
-        val pairedAcc = cmd.bits.cmd.rs1(61)
-        val pairedResidual = cmd.bits.cmd.rs1(62)
-        val indexedWeight = cmd.bits.cmd.rs1(63)
-
-        loop_being_configured.potalPairedAcc := potalEnable && pairedAcc
-
-        loop_being_configured.potalPairedResidual := potalEnable && pairedAcc && pairedResidual
-        loop_being_configured.potalIndexedWeight := indexedWeight &&
-                                                    potalEnable &&
-                                                    pairedAcc &&
-                                                    pairedResidual
-
-        when(indexedWeight) {
-          assert(potalEnable && pairedAcc && pairedResidual, "PoTal indexed Weight requires paired residual mode")
-          assert(loop_being_configured.b_dram_addr === 0.U, "Indexed Weight must reuse resident B without DMA")
-
-          // Indexed Weight must select one of the two physical bank pairs.
-          val weightBankPair = cmd.bits.cmd.rs1(17, 16)
-
-          assert(
-            weightBankPair === 1.U || weightBankPair === 2.U,
-            "PoTal indexed Weight requires bank pair 1 or 2"
-          )
-        }
-    
-
-        when(pairedAcc || pairedResidual) {
-          assert(potalEnable, "PoTal paired ACC requires PoTal mode")
-          assert(pairedAcc, "PoTal residual path requires paired ACC mode")
-          assert(loop_being_configured.d_dram_addr === 0.U, "PoTal paired ACC probe does not support D")
-          assert((loop_being_configured.max_i * loop_being_configured.max_j * block_size.U) <= (max_acc_addr / 2).U,
-                  "PoTal paired ACC exceeds one bank")
-        }        
-
-        val scaleBase = cmd.bits.cmd.rs1(36, 21)
-        val passesPerBlock = cmd.bits.cmd.rs1(60, 45)
-
-        loop_being_configured.potalEnabled := potalEnable
-        loop_being_configured.potalScaleBase := scaleBase
-        loop_being_configured.potalScaleGeneration := cmd.bits.cmd.rs1(44, 37)
-        loop_being_configured.potalPassesPerBlock := Mux(potalEnable, passesPerBlock, 1.U)        
-
-        when(potalEnable) {
-          val maxI = loop_being_configured.max_i
-          val maxJ = loop_being_configured.max_j
-          val maxK = loop_being_configured.max_k
-
-          val outputTiles = maxI * maxJ
-
-          // CPU already checked:
-          // scaleBlockK >= DIM
-          // scaleBlockK % DIM == 0
-          //
-          // So the encoded ratio must be nonzero.
-          assert(passesPerBlock =/= 0.U, "PoTal: passesPerBlock must be positive")
-          assert(maxI > 0.U && maxJ > 0.U && maxK > 0.U, "PoTal: invalid dimensions")
-          assert(outputTiles <= PoTalProtocol.WorkIdsPerLoop.U, "PoTal: work ID capacity exceeded")
-          assert(scaleBase <= scaleEntries.U, "PoTal: invalid scale base")
-
-          // At least the first N-tile scale block
-          // must fit in the selected scale window
-          assert(maxJ <= (scaleEntries.U - scaleBase), "PoTal: first scale block exceeds cache")
-          assert(loop_being_configured.pad_i < block_size.U && 
-                 loop_being_configured.pad_j < block_size.U &&
-                 loop_being_configured.pad_k < block_size.U, "PoTal: invalid padding")
-          assert(cmd.bits.cmd.rs2(2) === 0.U && 
-                 cmd.bits.cmd.rs2(1, 0) === 0.U, "PoTal: transpose/resadd unsupported")
-        }
-        loop_being_configured.configured := true.B
-
-        loops_configured := loops_configured + 1.U
       }
     }
   }
@@ -1375,11 +1522,16 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ex.io.req.bits.a_addr_start := exARegionBase +
     loop_requesting_ex.potalAOffsetTiles * block_size.U
   ex.io.req.bits.b_addr_end := Mux(loop_requesting_ex.b_ex_spad_id === 0.U, loop_requesting_ex.b_addr_end, (loop_requesting_ex.b_ex_spad_id) * (max_addr / concurrent_loops).U) 
+  ex.io.req.bits.resident := loop_requesting_ex.residentActive
+  ex.io.req.bits.resident_b_base := loop_requesting_ex.residentView.bBase
+  ex.io.req.bits.resident_b_pitch := loop_requesting_ex.residentView.bPitch
   ex.io.req.bits.a_tranpose := loop_requesting_ex.a_transpose
   ex.io.req.bits.b_tranpose := loop_requesting_ex.b_transpose
 
   val pairedAccBase = Mux(loop_requesting_ex.potalPairedResidual, (max_acc_addr / 2).U, 0.U)
-  ex.io.req.bits.c_addr_start := Mux(loop_requesting_ex.potalPairedAcc, pairedAccBase, ex_c_addr_start)
+  ex.io.req.bits.c_addr_start := Mux(loop_requesting_ex.residentActive,
+    pairedAccBase +& loop_requesting_ex.residentView.accBase,
+    Mux(loop_requesting_ex.potalPairedAcc, pairedAccBase, ex_c_addr_start))
 
   ex.io.req.bits.loop_id := loop_requesting_ex_id
   ex.io.req.bits.skip := is_resadd
@@ -1407,6 +1559,10 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldD.io.req.bits.dram_stride := loop_requesting_ldD.d_dram_stride
   ldD.io.req.bits.low_d := loop_requesting_ldD.low_d
   ldD.io.req.bits.addr_start := Mux(loop_requesting_ldD.potalPairedAcc, Mux(loop_requesting_ldD.potalPairedResidual, (max_acc_addr/2).U, 0.U), ld_d_addr_start)
+  when(loop_requesting_ldD.residentActive) {
+    ldD.io.req.bits.addr_start := Mux(loop_requesting_ldD.residentView.accBank,
+      (max_acc_addr / 2).U, 0.U) +& loop_requesting_ldD.residentView.accBase
+  }
   ldD.io.req.bits.loop_id := loop_requesting_ldD_id
 
   ldD.io.req.valid := !loop_requesting_ldD.ldd_started && loop_requesting_ldD.configured
@@ -1433,6 +1589,10 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   stC.io.req.bits.full_c := loop_requesting_st.full_c
   stC.io.req.bits.act := loop_requesting_st.act
   stC.io.req.bits.addr_start := Mux(loop_requesting_st.potalPairedAcc, Mux(loop_requesting_st.potalPairedResidual, (max_acc_addr / 2).U, 0.U), st_c_addr_start)
+  when(loop_requesting_st.residentActive) {
+    stC.io.req.bits.addr_start := Mux(loop_requesting_st.residentView.accBank,
+      (max_acc_addr / 2).U, 0.U) +& loop_requesting_st.residentView.accBase
+  }
   stC.io.req.bits.loop_id := loop_requesting_st_id
   stC.io.req.bits.is_resadd := is_resadd
 
@@ -1497,20 +1657,25 @@ object LoopMatmul {
             block_size: Int, coreMaxAddrBits: Int, rob_size: Int, max_lds: Int, max_exs: Int, max_sts: Int,
             max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
             mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
-            compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int)
-           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool]) = {
+            compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int,
+            residentViewSupported: Boolean, indexDescriptors: Vec[PoTalIndexConfig], indexComplete: Vec[Bool])
+           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool], DecoupledIO[PoTalScaleCommandResponse]) = {
     val mod = Module(new LoopMatmul(block_size, coreMaxAddrBits, rob_size, max_lds, max_exs, max_sts,
       max_addr, max_acc_addr, input_w, acc_w, dma_max_bytes,
-      mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries))
+      mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries,
+      residentViewSupported))
     mod.io.in <> in
     mod.io.ld_completed := ld_completed
     mod.io.st_completed := st_completed
     mod.io.ex_completed := ex_completed
+    mod.io.indexDescriptors := indexDescriptors
+    mod.io.indexComplete := indexComplete
     (
       mod.io.out,
       mod.io.busy,
       mod.io.indexedLoopActive,
-      mod.io.indexedLoopConfigured
+      mod.io.indexedLoopConfigured,
+      mod.io.resp
     )
   }
 

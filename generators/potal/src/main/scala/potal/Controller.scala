@@ -59,7 +59,8 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val tagWidth = 32
 
   // Counters
-  val counters = Module(new CounterController(outer.config.num_counter, outer.xLen))
+  val residentViewSupported = PoTalResidentCapability.supported(outer.config, outer.xLen)
+  val counters = Module(new CounterController(outer.config.num_counter, outer.xLen, residentViewSupported))
   counters.io.event_io.external_values(0) := 0.U
   counters.io.event_io.event_signal(0) := false.B
   counters.io.in.valid := false.B
@@ -286,12 +287,22 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     has_training_convs, has_max_pool, has_first_layer_optimizations, has_dw_convs) }
 
-  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
+  val residentIndexDescriptors = Wire(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
+  val residentIndexComplete = Wire(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+  residentIndexDescriptors := 0.U.asTypeOf(residentIndexDescriptors)
+  residentIndexComplete := VecInit(Seq.fill(PoTalProtocol.WeightBufferCount)(false.B))
+  potalIngressOpt.foreach { ingress =>
+    residentIndexDescriptors := ingress.io.indexDescriptors
+    residentIndexComplete := ingress.io.indexComplete
+  }
+
+  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured, loop_response) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
     meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
-    new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t), potalScaleEntries) }
+    new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t), potalScaleEntries,
+    residentViewSupported, residentIndexDescriptors, residentIndexComplete) }
 
   val unrolled_cmd = Queue(loop_cmd)
   unrolled_cmd.ready := false.B
@@ -333,6 +344,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       (gemminiRawCmd.bits.cmd.rs1(17, 16) === (buffer + 1).U)
 
     // Final acceptance into a LoopMatmul scheduler slot.
+    // Refused extended runs also consume this pending ownership.
     val loopConfigured =
       indexedLoopConfigured(buffer)
 
@@ -916,7 +928,8 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     unrolled_cmd.valid ||
     loop_cmd.valid ||
     conv_cmd.valid ||
-    potalResponsePending
+    potalResponsePending ||
+    io.resp.valid
 
  
   io.interrupt := tlb.io.exp.map(_.interrupt).reduce(_ || _)
@@ -927,11 +940,12 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   // RoCC response arbitration
   // ============================================================
 
+  val arbitratedResponse = Wire(Decoupled(new RoCCResponse))
   potalIngressOpt match {
     case Some(ingress) =>
 
       val responseArb =
-        Module(new RRArbiter(new RoCCResponse, 2))
+        Module(new RRArbiter(new RoCCResponse, 3))
 
       responseArb.io.in(0) <> counters.io.out
 
@@ -947,11 +961,25 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       ingress.io.resp.ready :=
         responseArb.io.in(1).ready
 
-      io.resp <> responseArb.io.out
+      responseArb.io.in(2).valid := loop_response.valid
+      responseArb.io.in(2).bits.rd := loop_response.bits.rd
+      responseArb.io.in(2).bits.data := loop_response.bits.status
+      loop_response.ready := responseArb.io.in(2).ready
+
+      arbitratedResponse <> responseArb.io.out
 
     case None =>
-      io.resp <> counters.io.out
+      val responseArb = Module(new RRArbiter(new RoCCResponse, 2))
+      responseArb.io.in(0) <> counters.io.out
+      responseArb.io.in(1).valid := loop_response.valid
+      responseArb.io.in(1).bits.rd := loop_response.bits.rd
+      responseArb.io.in(1).bits.data := loop_response.bits.status
+      loop_response.ready := responseArb.io.in(1).ready
+      arbitratedResponse <> responseArb.io.out
   }
+  // Hold the chosen rd/data even if another source becomes valid while the
+  // CPU stalls. Per-source registers alone do not lock an RR arbiter's choice.
+  io.resp <> Queue(arbitratedResponse, entries = 1)
 
   // Cycle counters
   val incr_ld_cycles = load_controller.io.busy && !store_controller.io.busy && !ex_controller.io.busy

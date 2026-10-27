@@ -43,6 +43,9 @@ object GemminiISA {
   val POTAL_INDEX_WRITE  = 26.U
   val POTAL_INDEX_CONFIG = 27.U
 
+  // H3-6E4B2: two-word, acknowledged scheduler-slot resident view.
+  val POTAL_RESIDENT_VIEW = 28.U
+
   // rs1[2:0] values
   val CONFIG_EX = 0.U
   val CONFIG_LOAD = 1.U

@@ -1,0 +1,34 @@
+package potal
+
+import chisel3._
+
+// Captured in the configuring slot, then retained until generator retirement.
+// Validity and active mode are separate: a run consumes staging, not its data.
+class PoTalResidentView extends Bundle {
+  val bBase = UInt(16.W)
+  val bPitch = UInt(16.W)
+  val jOrigin = UInt(16.W)
+  val accBase = UInt(16.W)
+  val pair = Bool()
+  val indexed = Bool()
+  val accBank = Bool()
+}
+
+object PoTalResidentCapability {
+  val Query = BigInt("504f544100000000", 16)
+  val Signature = BigInt("504f544102100007", 16)
+
+  def supported[T <: Data, U <: Data, V <: Data](
+    config: GemminiArrayConfig[T, U, V], xLen: Int
+  ): Boolean =
+    xLen == 64 && config.num_counter > 0 &&
+    config.enablePoTalSat32Acc && config.dataflow == Dataflow.WS &&
+    config.DIM == 16 && config.tileRows == 1 && config.tileColumns == 1 &&
+    config.sp_banks == 4 && config.sp_bank_entries == 4096 &&
+    config.acc_banks == 2 && config.acc_bank_entries == 512 &&
+    config.potalScaleEntries == 256 && config.potalIndexEntries == 32 &&
+    config.inputType.isInstanceOf[SInt] && config.inputType.getWidth == 8 &&
+    config.spatialArrayOutputType.getWidth == 20 && config.accType.getWidth == 32 &&
+    config.ex_read_from_spad && config.ex_write_to_acc &&
+    config.mvin_scale_args.isEmpty && config.mvin_scale_acc_args.isEmpty
+}

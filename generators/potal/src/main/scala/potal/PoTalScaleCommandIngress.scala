@@ -145,6 +145,11 @@ final class PoTalScaleCommandIngress(
 
     val indexConfiguredByBuffer =
       Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
+
+    // A descriptor is readable only after its entire declared window is
+    // written. Mirror exactly the transactions also sent to Execute.
+    val indexComplete =
+      Output(Vec(PoTalProtocol.WeightBufferCount, Bool()))
   })
 
   // ----------------------------------------------------------
@@ -261,6 +266,15 @@ final class PoTalScaleCommandIngress(
   val indexConfiguredRegs = RegInit(VecInit(Seq.fill(
     PoTalProtocol.WeightBufferCount)(false.B)
   ))
+  val indexWritten = RegInit(VecInit(Seq.fill(PoTalProtocol.WeightBufferCount)(
+    VecInit(Seq.fill(indexEntries)(false.B)))))
+
+  for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+    io.indexComplete(buffer) := indexConfiguredRegs(buffer) &&
+      (0 until indexEntries).map { slot =>
+        slot.U >= indexDescriptorRegs(buffer).activeRows || indexWritten(buffer)(slot)
+      }.reduce(_ && _)
+  }
 
   // INDEX_WRITE targets the last successfully configured buffer.
   val selectedWeightBufferId =
@@ -384,7 +398,11 @@ final class PoTalScaleCommandIngress(
   when(io.indexConfigWrite.valid) {
     indexDescriptorRegs(configuredWeightBufferId) := cfgValue
     indexConfiguredRegs(configuredWeightBufferId) := true.B
+    indexWritten(configuredWeightBufferId).foreach(_ := false.B)
     selectedWeightBufferId := configuredWeightBufferId
+  }
+  when(io.indexWrite.valid) {
+    indexWritten(selectedWeightBufferId)(io.indexWrite.bits.slot) := true.B
   }
 
   // ----------------------------------------------------------

@@ -215,7 +215,8 @@ class CounterFile(nPerfCounter: Int, counterWidth: Int) extends Module
   }
 }
 
-class CounterController(nPerfCounter: Int, counterWidth: Int)(implicit p: Parameters) extends Module {
+class CounterController(nPerfCounter: Int, counterWidth: Int,
+                        residentViewSupported: Boolean = false)(implicit p: Parameters) extends Module {
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new RoCCCommand))
     val out = Decoupled(new RoCCResponse)
@@ -230,6 +231,10 @@ class CounterController(nPerfCounter: Int, counterWidth: Int)(implicit p: Parame
 
     val out_reg = Reg(io.out.bits.cloneType)
     val out_valid_reg = RegInit(false.B)
+    val capabilityRead = (residentViewSupported && counterWidth == 64).B &&
+      io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
+      io.in.bits.rs1 === PoTalResidentCapability.Query.U(64.W) &&
+      io.in.bits.rs2 === 0.U
 
     // Decode access option (assume 8 counters)
     // rs1[0] = Global counter value reset
@@ -243,10 +248,10 @@ class CounterController(nPerfCounter: Int, counterWidth: Int)(implicit p: Parame
 
     io.in.ready := !out_valid_reg
     counterfile.io.addr := io.in.bits.rs1(nCounterIndexBit + 3, 4)
-    counterfile.io.counter_reset := io.in.bits.rs1(0) & io.in.fire
-    counterfile.io.snapshot_reset := io.in.bits.rs1(1) & io.in.fire
-    counterfile.io.snapshot := io.in.bits.rs1(2) & io.in.fire
-    counterfile.io.config_address.valid := io.in.bits.rs1(3) & io.in.fire
+    counterfile.io.counter_reset := io.in.bits.rs1(0) & io.in.fire & !capabilityRead
+    counterfile.io.snapshot_reset := io.in.bits.rs1(1) & io.in.fire & !capabilityRead
+    counterfile.io.snapshot := io.in.bits.rs1(2) & io.in.fire & !capabilityRead
+    counterfile.io.config_address.valid := io.in.bits.rs1(3) & io.in.fire & !capabilityRead
     counterfile.io.config_address.bits := io.in.bits.rs1(17, 12)
     counterfile.io.external := io.in.bits.rs1(31)
 
@@ -256,7 +261,8 @@ class CounterController(nPerfCounter: Int, counterWidth: Int)(implicit p: Parame
       out_valid_reg := true.B
       out_reg.rd := io.in.bits.inst.rd
       out_reg.data := 0.U
-      out_reg.data := counterfile.io.data
+      out_reg.data := Mux(capabilityRead,
+        PoTalResidentCapability.Signature.U(64.W), counterfile.io.data)
     }
 
     io.out.valid := out_valid_reg
