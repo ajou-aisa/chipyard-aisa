@@ -128,9 +128,10 @@ int main(void) {
           STATUS_INVALID_SCALE);
 
     // DIM16 has columns 0..15.
+    // Column 16 sets a reserved bit above the four-bit column field.
     check("invalid column",
           potal_write(6, 1, 16, 1),
-          STATUS_INVALID_COLUMN);
+          STATUS_INVALID_ENCODING);
 
     // Reserved rs1 bit is not allowed.
     check("invalid encoding",
