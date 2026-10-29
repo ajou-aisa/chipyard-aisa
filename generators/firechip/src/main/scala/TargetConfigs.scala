@@ -338,6 +338,20 @@ class FireSimQuadRocketSinglePoTalD32Config extends Config(
   new FireSimPoTalD32RocketConfig
 )
 
+class FireSimPoTalD32PrefetchObservationRocketConfig extends Config(
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.PoTalSat32D32PrefetchObservationGemminiRocketConfig
+)
+
+class FireSimQuadRocketSinglePoTalD32PrefetchObservationConfig extends Config(
+  new chipyard.config.WithMultiRoCC ++
+  new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(3) ++
+  new FireSimPoTalD32PrefetchObservationRocketConfig
+)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************

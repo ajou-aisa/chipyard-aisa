@@ -6,6 +6,7 @@ import java.nio.file.{Files, Paths}
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.experimental.BoringUtils
 import org.chipsalliance.cde.config._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
@@ -60,7 +61,12 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
 
   // Counters
   val residentViewSupported = PoTalResidentCapability.supported(outer.config, outer.xLen)
-  val counters = Module(new CounterController(outer.config.num_counter, outer.xLen, residentViewSupported))
+  val prefetchObservationSupported = PoTalPrefetchCapability.supported(
+    outer.config, outer.xLen, p(PoTalPrefetchObservationEnabled))
+  require(!p(PoTalPrefetchObservationEnabled) || prefetchObservationSupported,
+    "PoTal prefetch observation requires the supported DIM32 physical geometry")
+  val counters = Module(new CounterController(outer.config.num_counter, outer.xLen,
+    residentViewSupported, prefetchObservationSupported))
   counters.io.event_io.external_values(0) := 0.U
   counters.io.event_io.event_signal(0) := false.B
   counters.io.in.valid := false.B
@@ -999,6 +1005,25 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   counters.io.event_io.connectEventSignal(CounterEvent.MAIN_LD_EX_CYCLES, incr_ld_ex_cycles)
   counters.io.event_io.connectEventSignal(CounterEvent.MAIN_ST_EX_CYCLES, incr_st_ex_cycles)
   counters.io.event_io.connectEventSignal(CounterEvent.MAIN_LD_ST_EX_CYCLES, incr_ld_st_ex_cycles)
+
+  if (prefetchObservationSupported) {
+    // Tap existing physical SRAM port masks without changing Scratchpad's
+    // arbitration or interface. BoringUtils inserts wires only, no registers.
+    // dmaSpadWrite is high for the selected DMA data write, excluding both
+    // zero-fill and Execute writes. Odd banks alone are B in the paired layout.
+    val bWrites = Seq(1, 3).map { bank =>
+      val source = spad.module.spad_mems(bank).io.write.mask
+      val mask = WireInit(0.U.asTypeOf(chiselTypeOf(source)))
+      BoringUtils.bore(source, Seq(mask))
+      PoTalPrefetchObservation.bWrite(spad.module.io.dmaSpadWrite(bank), mask.asUInt)
+    }
+    PoTalPrefetchObservation.connect(counters.io.event_io,
+      bWrites(0), bWrites(1), ex_controller.io.qualifiedMac.get)
+  } else {
+    for (event <- CounterEvent.POTAL_B0_DMA_WRITE until CounterEvent.n) {
+      counters.io.event_io.connectEventSignal(event, false.B)
+    }
+  }
 
   // ------------------------------------------------------------
   // PoTal physical Scratchpad / Mesh data-path overlap monitor.

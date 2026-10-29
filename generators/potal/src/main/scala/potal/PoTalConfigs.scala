@@ -163,6 +163,15 @@ class PoTalSat32D32GemminiConfig
       PoTalConfigs.a8w8D32Sat32
     )
 
+// Same array, header, memory geometry and arithmetic as the ordinary DIM32
+// configuration. Only the explicitly named image carries observation wiring.
+class PoTalSat32D32PrefetchObservationGemminiConfig
+    extends org.chipsalliance.cde.config.Config(
+      new org.chipsalliance.cde.config.Config((site, here, up) => {
+        case PoTalPrefetchObservationEnabled => true
+      }) ++ new PoTalSat32D32GemminiConfig
+    )
+
 class PoTalSat32D64GemminiConfig
     extends DefaultGemminiConfig[SInt, Float, Float](
       PoTalConfigs.a8w8D64Sat32

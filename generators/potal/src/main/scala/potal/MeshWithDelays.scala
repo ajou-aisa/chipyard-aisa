@@ -6,13 +6,15 @@ import chisel3.util._
 
 import potal.Util._
 
-class MeshWithDelaysReq[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](accType: T, tagType: TagT, block_size: Int) extends Bundle {
+class MeshWithDelaysReq[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](accType: T, tagType: TagT, block_size: Int,
+                                                                          observePrefetch: Boolean = false) extends Bundle {
   val pe_control = new PEControl(accType)
   val a_transpose = Bool()
   val bd_transpose = Bool()
   val total_rows = UInt(log2Up(block_size+1).W)
   val tag = tagType
   val flush = UInt(2.W) // TODO magic number
+  val computeUseful = if (observePrefetch) Some(Bool()) else None
 
 }
 
@@ -33,7 +35,8 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   (inputType: T, val outputType: T, accType: T,
    tagType: U, df: Dataflow.Value, tree_reduction: Boolean, tile_latency: Int, output_delay: Int,
    tileRows: Int, tileColumns: Int, meshRows: Int, meshColumns: Int,
-   leftBanks: Int, upBanks: Int, outBanks: Int = 1, n_simultaneous_matmuls: Int = -1)
+   leftBanks: Int, upBanks: Int, outBanks: Int = 1, n_simultaneous_matmuls: Int = -1,
+   observePrefetch: Boolean = false)
   extends Module {
 
   val A_TYPE = Vec(meshRows, Vec(tileRows, inputType))
@@ -60,7 +63,10 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
     val b = Flipped(Decoupled(B_TYPE))
     val d = Flipped(Decoupled(D_TYPE))
 
-    val req = Flipped(Decoupled(new MeshWithDelaysReq(accType, tagType.cloneType, block_size)))
+    val req = Flipped(Decoupled(new MeshWithDelaysReq(accType, tagType.cloneType, block_size, observePrefetch)))
+    val aObservation = if (observePrefetch) Some(Input(Valid(Bool()))) else None
+    val dObservation = if (observePrefetch) Some(Input(Valid(Bool()))) else None
+    val qualifiedMac = if (observePrefetch) Some(Output(Valid(Bool()))) else None
 
     val resp = Valid(new MeshWithDelaysResp(outputType, meshColumns, tileColumns, block_size, tagType.cloneType))
 
@@ -90,7 +96,7 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
     }
   }
 
-  val req = Reg(UDValid(new MeshWithDelaysReq(accType, tagType, block_size)))
+  val req = Reg(UDValid(new MeshWithDelaysReq(accType, tagType, block_size, observePrefetch)))
 
   val matmul_id = RegInit(0.U(log2Up(max_simultaneous_matmuls).W))
 
@@ -164,7 +170,25 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   val transposer_out = VecInit(transposer.io.outCol.bits.grouped(tileRows).map(t => VecInit(t)).toSeq)
 
   // Wire up mesh's IO to this module's IO
-  val mesh = Module(new Mesh(inputType, outputType, accType, df, tree_reduction, tile_latency, max_simultaneous_matmuls, output_delay, tileRows, tileColumns, meshRows, meshColumns))
+  val mesh = Module(new Mesh(inputType, outputType, accType, df, tree_reduction, tile_latency, max_simultaneous_matmuls, output_delay, tileRows, tileColumns, meshRows, meshColumns, observePrefetch))
+
+  if (observePrefetch) {
+    require(df == Dataflow.WS && tileRows == 1 && tileColumns == 1)
+    // Capture metadata on the EXACT same handshakes as a_buf and d_buf.
+    // A may arrive before D, or while a different request is being retired.
+    val aObservation = RegEnable(io.aObservation.get, io.a.fire)
+    val dObservation = RegEnable(io.dObservation.get, io.d.fire)
+    val direct = !req.bits.a_transpose && !req.bits.bd_transpose
+    val rowValid = !pause && req.bits.flush === 0.U && direct
+    val observation = mesh.io.observation.get
+    observation.a := aObservation
+    observation.d := dObservation
+    observation.a.valid := rowValid && aObservation.valid
+    observation.d.valid := rowValid && dObservation.valid
+    observation.compute := rowValid && req.bits.computeUseful.get
+    // Row/column zero have zero skew in shifted(); Mesh adds tile_latency+1.
+    io.qualifiedMac.get := observation.mac
+  }
 
   // TODO wire only to *_buf here, instead of io.*.bits
   val a_shifter_in = WireInit(Mux(a_is_from_transposer, transposer_out.asTypeOf(A_TYPE), a_buf))

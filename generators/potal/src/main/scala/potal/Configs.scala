@@ -1,7 +1,7 @@
 package potal
 
 import chisel3._
-import org.chipsalliance.cde.config.{Config, Parameters}
+import org.chipsalliance.cde.config.{Config, Field, Parameters}
 import freechips.rocketchip.diplomacy.LazyModule
 import freechips.rocketchip.subsystem._
 import freechips.rocketchip.tile.{BuildRoCC, OpcodeSet, XLen}
@@ -16,6 +16,9 @@ import hardfloat._
 // -----------------------
 // Component Mixin Configs
 // -----------------------
+
+// Observation is opt-in and does not change GemminiArrayConfig/header geometry.
+case object PoTalPrefetchObservationEnabled extends Field[Boolean](false)
 
 object GemminiConfigs {
   val defaultConfig = GemminiArrayConfig[SInt, Float, Float](

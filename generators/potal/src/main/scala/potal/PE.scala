@@ -4,6 +4,25 @@ package potal
 import chisel3._
 import chisel3.util._
 
+// Observation-only metadata for the representative physical PE (0, 0).
+// A and D tags describe operands, not current command/RS occupancy.
+class PoTalPEObservation extends Bundle {
+  val a = Input(Valid(Bool())) // bits: physical pair
+  val d = Input(Valid(Bool())) // bits: physical pair of the incoming weight
+  val compute = Input(Bool())
+  val mac = Output(Valid(Bool()))
+}
+
+object PoTalOperandObservation {
+  def aUseful(compute: Bool, garbage: Bool, cols: UInt,
+              fromAcc: Bool, im2col: Bool, bank: UInt): Bool =
+    compute && !garbage && cols =/= 0.U && !fromAcc && !im2col && !bank(0)
+
+  def dUseful(garbage: Bool, zeroFill: Bool, cols: UInt,
+              fromAcc: Bool, bank: UInt): Bool =
+    !garbage && !zeroFill && cols =/= 0.U && !fromAcc && bank(0)
+}
+
 class PEControl[T <: Data : Arithmetic](accType: T) extends Bundle {
   val dataflow = UInt(1.W) // TODO make this an Enum
   val propagate = UInt(1.W) // Which register should be propagated (and which should be accumulated)?
@@ -28,7 +47,8 @@ class MacUnit[T <: Data](inputType: T, cType: T, dType: T) (implicit ev: Arithme
   * A PE implementing a MAC operation. Configured as fully combinational when integrated into a Mesh.
   * @param width Data width of operands
   */
-class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value, max_simultaneous_matmuls: Int)
+class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value, max_simultaneous_matmuls: Int,
+                   observePrefetch: Boolean = false)
                    (implicit ev: Arithmetic[T]) extends Module { // Debugging variables
   import ev._
 
@@ -53,6 +73,7 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
     val out_valid = Output(Bool())
 
     val bad_dataflow = Output(Bool())
+    val observation = if (observePrefetch) Some(new PoTalPEObservation) else None
   })
 
   val cType = if (df == Dataflow.WS) inputType else accType
@@ -143,5 +164,26 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
     c2 := c2
     mac_unit.io.in_b := DontCare
     mac_unit.io.in_c := DontCare
+  }
+
+  if (observePrefetch) {
+    require(df == Dataflow.WS)
+    val observation = io.observation.get
+    val weight1 = RegInit(0.U.asTypeOf(Valid(Bool())))
+    val weight2 = RegInit(0.U.asTypeOf(Valid(Bool())))
+    // Follow precisely the c1/c2 load enables above. A simultaneous preload
+    // changes the OTHER register; the MAC consumes its pre-edge stationary B.
+    when(valid) {
+      when(prop === PROPAGATE) {
+        weight1 := observation.d
+      }.otherwise {
+        weight2 := observation.d
+      }
+    }
+    val weight = Mux(prop === PROPAGATE, weight2, weight1)
+    observation.mac.valid := valid && observation.compute &&
+      observation.a.valid && weight.valid &&
+      observation.a.bits === weight.bits
+    observation.mac.bits := observation.a.bits
   }
 }

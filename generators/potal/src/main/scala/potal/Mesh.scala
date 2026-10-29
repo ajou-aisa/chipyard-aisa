@@ -18,7 +18,8 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
                                    df: Dataflow.Value, tree_reduction: Boolean, tile_latency: Int,
                                    max_simultaneous_matmuls: Int, output_delay: Int,
                                    val tileRows: Int, val tileColumns: Int,
-                                   val meshRows: Int, val meshColumns: Int) extends Module {
+                                   val meshRows: Int, val meshColumns: Int,
+                                   observePrefetch: Boolean = false) extends Module {
   val io = IO(new Bundle {
     val in_a = Input(Vec(meshRows, Vec(tileRows, inputType)))
     val in_b = Input(Vec(meshColumns, Vec(tileColumns, inputType)))
@@ -33,11 +34,28 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
     val out_control = Output(Vec(meshColumns, Vec(tileColumns, new PEControl(accType))))
     val out_id = Output(Vec(meshColumns, Vec(tileColumns, UInt(log2Up(max_simultaneous_matmuls).W))))
     val out_last = Output(Vec(meshColumns, Vec(tileColumns, Bool())))
+    val observation = if (observePrefetch) Some(new PoTalPEObservation) else None
   })
 
   // mesh(r)(c) => Tile at row r, column c
-  val mesh: Seq[Seq[Tile[T]]] = Seq.fill(meshRows, meshColumns)(Module(new Tile(inputType, outputType, accType, df, tree_reduction, max_simultaneous_matmuls, tileRows, tileColumns)))
+  val mesh: Seq[Seq[Tile[T]]] = Seq.tabulate(meshRows, meshColumns) { (r, c) =>
+    Module(new Tile(inputType, outputType, accType, df, tree_reduction, max_simultaneous_matmuls,
+      tileRows, tileColumns, observePrefetch && r == 0 && c == 0))
+  }
   val meshT = mesh.transpose
+
+  if (observePrefetch) {
+    val in = io.observation.get
+    val pe = mesh(0)(0).io.observation.get
+    // PE(0,0)'s actual A/D/control and valid all cross this same boundary.
+    // Reset only the observation valid bits, never the arithmetic pipeline.
+    pe.a.valid := ShiftRegister(in.a.valid, tile_latency + 1, false.B, true.B)
+    pe.a.bits := ShiftRegister(in.a.bits, tile_latency + 1)
+    pe.d.valid := ShiftRegister(in.d.valid, tile_latency + 1, false.B, true.B)
+    pe.d.bits := ShiftRegister(in.d.bits, tile_latency + 1)
+    pe.compute := ShiftRegister(in.compute, tile_latency + 1, false.B, true.B)
+    in.mac := pe.mac
+  }
 
   def pipe[T <: Data](valid: Bool, t: T, latency: Int): T = {
     // The default "Pipe" function apparently resets the valid signals to false.B. We would like to avoid using global

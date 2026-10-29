@@ -70,7 +70,36 @@ object CounterEvent {
   val LOOP_MATMUL_ACTIVE_CYCLES = 43
   val TRANSPOSE_PRELOAD_UNROLLER_ACTIVE_CYCLES = 44
 
-  val n = 45
+  // Target-clock cycle events, not bytes, PE totals, or completion certificates.
+  val POTAL_B0_DMA_WRITE = 45
+  val POTAL_B1_DMA_WRITE = 46
+  val POTAL_PAIR0_MAC = 47
+  val POTAL_PAIR1_MAC = 48
+  val POTAL_PAIR0_MAC_B1_WRITE = 49
+  val POTAL_PAIR1_MAC_B0_WRITE = 50
+  val POTAL_CROSS_PAIR_OVERLAP = 51
+
+  val n = 52
+}
+
+object PoTalPrefetchObservation {
+  // The DMA-origin selector excludes Execute and zero-writer arbitration.
+  // The mask must be the selected physical SRAM mask, not a DMA request mask.
+  def bWrite(dmaSelected: Bool, mask: UInt): Bool = dmaSelected && mask.orR
+
+  def connect(events: CounterEventIO, b0: Bool, b1: Bool, mac: ValidIO[Bool]): Unit = {
+    val mac0 = mac.valid && !mac.bits
+    val mac1 = mac.valid && mac.bits
+    val overlap01 = mac0 && b1
+    val overlap10 = mac1 && b0
+    events.connectEventSignal(CounterEvent.POTAL_B0_DMA_WRITE, b0)
+    events.connectEventSignal(CounterEvent.POTAL_B1_DMA_WRITE, b1)
+    events.connectEventSignal(CounterEvent.POTAL_PAIR0_MAC, mac0)
+    events.connectEventSignal(CounterEvent.POTAL_PAIR1_MAC, mac1)
+    events.connectEventSignal(CounterEvent.POTAL_PAIR0_MAC_B1_WRITE, overlap01)
+    events.connectEventSignal(CounterEvent.POTAL_PAIR1_MAC_B0_WRITE, overlap10)
+    events.connectEventSignal(CounterEvent.POTAL_CROSS_PAIR_OVERLAP, overlap01 || overlap10)
+  }
 }
 
 object CounterExternal {
@@ -216,7 +245,8 @@ class CounterFile(nPerfCounter: Int, counterWidth: Int) extends Module
 }
 
 class CounterController(nPerfCounter: Int, counterWidth: Int,
-                        residentViewSupported: Boolean = false)(implicit p: Parameters) extends Module {
+                        residentViewSupported: Boolean = false,
+                        prefetchObservationSupported: Boolean = false)(implicit p: Parameters) extends Module {
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new RoCCCommand))
     val out = Decoupled(new RoCCResponse)
@@ -231,10 +261,15 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
 
     val out_reg = Reg(io.out.bits.cloneType)
     val out_valid_reg = RegInit(false.B)
-    val capabilityRead = (residentViewSupported && counterWidth == 64).B &&
+    val residentCapabilityRead = (residentViewSupported && counterWidth == 64).B &&
       io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
       io.in.bits.rs1 === PoTalResidentCapability.Query.U(64.W) &&
       io.in.bits.rs2 === 0.U
+    val observationCapabilityRead = (prefetchObservationSupported && counterWidth == 64).B &&
+      io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
+      io.in.bits.rs1 === PoTalPrefetchCapability.Query.U(64.W) &&
+      io.in.bits.rs2 === 0.U
+    val capabilityRead = residentCapabilityRead || observationCapabilityRead
 
     // Decode access option (assume 8 counters)
     // rs1[0] = Global counter value reset
@@ -261,8 +296,8 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
       out_valid_reg := true.B
       out_reg.rd := io.in.bits.inst.rd
       out_reg.data := 0.U
-      out_reg.data := Mux(capabilityRead,
-        PoTalResidentCapability.Signature.U(64.W), counterfile.io.data)
+      out_reg.data := Mux(observationCapabilityRead, PoTalPrefetchCapability.Signature.U(64.W),
+        Mux(residentCapabilityRead, PoTalResidentCapability.Signature.U(64.W), counterfile.io.data))
     }
 
     io.out.valid := out_valid_reg

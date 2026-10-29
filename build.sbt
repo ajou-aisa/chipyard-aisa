@@ -254,6 +254,8 @@ lazy val potal = (project in file("generators/potal"))
         "PoTalScaleBlockSpec.scala",
         "PoTalScaleCommandIngressSpec.scala",
         "PoTalDim32IngressSpec.scala",
+        "PoTalResidentTestSupport.scala",
+        "PoTalPrefetchOverlapSpec.scala",
         "PoTalAccPipeSpec.scala",
         "PoTalAccumulatorRMWSpec.scala",
         "PoTalPreloadReservationGateSpec.scala",

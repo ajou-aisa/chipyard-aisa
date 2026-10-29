@@ -49,6 +49,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     // Actual Scratchpad input acceptance by the Execute datapath.
     // Indexed by physical Scratchpad bank.
     val meshSpadInputAccepted = Output(Vec(sp_banks, Bool()))
+    val qualifiedMac = if (p(PoTalPrefetchObservationEnabled)) Some(Output(Valid(Bool()))) else None
 
     // Mesh-side completion of a PoTal PRELOAD.
     // This is not yet the final ROB completion.
@@ -287,7 +288,24 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   // Instantiate the actual mesh
   val mesh = Module(new MeshWithDelays(inputType, spatialArrayOutputType, accType, mesh_tag, dataflow, tree_reduction, tile_latency, mesh_output_delay,
-    tileRows, tileColumns, meshRows, meshColumns, shifter_banks, shifter_banks))
+    tileRows, tileColumns, meshRows, meshColumns, shifter_banks, shifter_banks,
+    observePrefetch = p(PoTalPrefetchObservationEnabled)))
+
+  if (p(PoTalPrefetchObservationEnabled)) {
+    // These controls already travelled with the SRAM read through the control
+    // queue. MeshWithDelays then retains each operand's tag with that operand.
+    val computeUseful = cntl_valid && (cntl.perform_single_mul || cntl.perform_mul_pre)
+    mesh.io.req.bits.computeUseful.get := computeUseful
+    mesh.io.aObservation.get.valid := PoTalOperandObservation.aUseful(
+      computeUseful, cntl.a_garbage, cntl.a_unpadded_cols,
+      cntl.a_read_from_acc, cntl.im2colling, cntl.a_bank)
+    mesh.io.aObservation.get.bits := cntl.a_bank(1)
+    mesh.io.dObservation.get.valid := cntl_valid && PoTalOperandObservation.dUseful(
+      cntl.d_garbage, cntl.preload_zeros, cntl.d_unpadded_cols,
+      cntl.d_read_from_acc, cntl.d_bank)
+    mesh.io.dObservation.get.bits := cntl.d_bank(1)
+    io.qualifiedMac.get := mesh.io.qualifiedMac.get
+  }
 
   mesh.io.a.valid := false.B
   mesh.io.b.valid := false.B

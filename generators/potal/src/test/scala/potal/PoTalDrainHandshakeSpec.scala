@@ -29,8 +29,10 @@ final class PoTalDrainObservedAccumulatorMem(
 // Real PoTalScaleCommandIngress -> real PoTalWriteback ->
 // real ACC SRAM banks. Only the older-Gemmini drain predicate and
 // the physical ACC backpressure are test-controlled.
-final class PoTalDrainHandshakeHarness extends Module {
-  val config = GemminiConfigs.defaultConfig.copy(
+final class PoTalDrainHandshakeHarness(productionDim32: Boolean = false) extends Module {
+  private val baseConfig = if (productionDim32) PoTalConfigs.a8w8D32Sat32 else GemminiConfigs.defaultConfig
+  private val scaleEntries = if (productionDim32) 256 else 8
+  val config = baseConfig.copy(
     dataflow = Dataflow.WS,
     acc_capacity = CapacityInMatrices(2),
     acc_latency = 2,
@@ -39,7 +41,7 @@ final class PoTalDrainHandshakeHarness extends Module {
   )
 
   private val dim = config.DIM
-  require(dim == 16, "W3-2c-9d-2 test assumes DIM16")
+  require(dim == (if (productionDim32) 32 else 16))
   private val rowType = Vec(dim, Vec(1, SInt(32.W)))
   private def writeType =
     new AccumulatorWriteReq(config.acc_bank_entries, rowType)
@@ -79,13 +81,13 @@ final class PoTalDrainHandshakeHarness extends Module {
   })
 
   val ingress = Module(new PoTalScaleCommandIngress(
-    dim = dim, scaleEntries = 8,
+    dim = dim, scaleEntries = scaleEntries,
     indexEntries = config.potalIndexEntries, spRows = config.potalSpRows,
     generationWidth = 8))
 
   val wb = Module(new PoTalWriteback(
     config,
-    scaleEntries = 8,
+    scaleEntries = scaleEntries,
     generationWidth = 8,
     workEntries = 4,
     contextDepth = 2,
@@ -571,6 +573,24 @@ class PoTalDrainHandshakeSpec extends ChiselFlatSpec {
           "--target-dir", s"test_run_dir/potal-drain-handshake-$scenario"
         ),
         () => new PoTalDrainHandshakeHarness
+      ) { dut =>
+        new PoTalDrainHandshakeTester(dut, scenario)
+      } should be (true)
+    }
+  }
+}
+
+// Preserve the older reduced-cache fixture and its existing encoding failure.
+// This sibling exercises the same SRAM/ROB/Release/Fence assertions with the
+// production DIM32 command geometry, keeping only ACC capacity reduced.
+class PoTalDim32DrainHandshakeSpec extends ChiselFlatSpec {
+  behavior of "PoTal DIM32 RELEASE/FENCE under real writeback drain"
+  for (scenario <- 0 until 3) {
+    it should s"preserve production command drain sequencing in scenario $scenario" in {
+      Driver.execute(
+        Array("--backend-name", "verilator",
+          "--target-dir", s"test_run_dir/h3-8d2-dim32-drain-$scenario"),
+        () => new PoTalDrainHandshakeHarness(productionDim32 = true)
       ) { dut =>
         new PoTalDrainHandshakeTester(dut, scenario)
       } should be (true)
