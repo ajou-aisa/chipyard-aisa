@@ -46,6 +46,9 @@ object GemminiISA {
   // H3-6E4B2: two-word, acknowledged scheduler-slot resident view.
   val POTAL_RESIDENT_VIEW = 28.U
 
+  // H3-8G: acknowledged scheduler admission, not DMA completion.
+  val POTAL_LDB_ONLY = 29.U
+
   // rs1[2:0] values
   val CONFIG_EX = 0.U
   val CONFIG_LOAD = 1.U

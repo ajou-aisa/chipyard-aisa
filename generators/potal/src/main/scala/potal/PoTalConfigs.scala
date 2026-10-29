@@ -172,6 +172,13 @@ class PoTalSat32D32PrefetchObservationGemminiConfig
       }) ++ new PoTalSat32D32GemminiConfig
     )
 
+class PoTalSat32D32EarlyPrefetchObservationGemminiConfig
+    extends org.chipsalliance.cde.config.Config(
+      new org.chipsalliance.cde.config.Config((site, here, up) => {
+        case PoTalEarlyPrefetchEnabled => true
+      }) ++ new PoTalSat32D32PrefetchObservationGemminiConfig
+    )
+
 class PoTalSat32D64GemminiConfig
     extends DefaultGemminiConfig[SInt, Float, Float](
       PoTalConfigs.a8w8D64Sat32

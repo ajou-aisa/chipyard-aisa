@@ -91,3 +91,10 @@ class PoTalSat32D32PrefetchObservationGemminiRocketConfig extends Config(
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig
 )
+
+class PoTalSat32D32EarlyPrefetchObservationGemminiRocketConfig extends Config(
+  new potal.PoTalSat32D32EarlyPrefetchObservationGemminiConfig ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig
+)

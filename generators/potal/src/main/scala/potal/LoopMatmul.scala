@@ -768,6 +768,9 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
   val residentStaged = Bool()
   val residentActive = Bool()
   val configComplete = UInt(5.W)
+  val loadOnly = Bool()
+  // Preserve validation of the full wire words before address truncation.
+  val loadOnlyConfigValid = UInt(5.W)
 
   // H2-2B1: bank-local A offset measured in DIM-row tiles.
   val potalAOffsetTiles = UInt(log2Up(max_addr).W)
@@ -813,6 +816,8 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
     residentStaged := false.B
     residentActive := false.B
     configComplete := 0.U
+    loadOnly := false.B
+    loadOnlyConfigValid := 0.U
 
     running := false.B
 
@@ -836,8 +841,11 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
                  max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
                  mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
                  compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int,
-                 residentViewSupported: Boolean = false)
+                 residentViewSupported: Boolean = false, ldbOnlySupported: Boolean = false)
                 (implicit p: Parameters) extends Module {
+  require(!ldbOnlySupported ||
+    (block_size == 32 && input_w == 8 && acc_w == 32 && max_addr == 8192 &&
+      max_acc_addr == 512 && coreMaxAddrBits <= 64))
   val iterator_bitwidth = 16
   val max_block_len = (dma_max_bytes / (block_size * input_w / 8)) max 1
   val max_block_len_acc = (dma_max_bytes / (block_size * acc_w / 8)) max 1
@@ -850,6 +858,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     val ex_completed = Input(UInt(log2Up(reservation_station_size+1).W))
     val busy = Output(Bool())
     val resp = Decoupled(new PoTalScaleCommandResponse)
+    val ldbOnlyAdmission = Output(Valid(UInt(1.W)))
     val indexDescriptors = Input(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
     val indexComplete = Input(Vec(PoTalProtocol.WeightBufferCount, Bool()))
 
@@ -919,7 +928,14 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldab_arb.io.inA <> ldA.io.cmd
   ldab_arb.io.inB <> ldB.io.cmd
   val ab_loads_on_same_loop = ldA.io.loop_id === ldB.io.loop_id
-  val forceA = !ab_loads_on_same_loop && ldA.io.loop_id === head_loop_id
+  // A load-only tail never requests LdA, so LdA retains the head's loop ID.
+  // Once the head's A generator has really started and is idle, forcing that
+  // invalid A stream would starve independent tail B forever. Admission has
+  // already proved disjoint ranges; RS still owns physical DMA dependencies.
+  val independentBOnly = ldbOnlySupported.B && loops(ldB.io.loop_id).configured &&
+    loops(ldB.io.loop_id).loadOnly && ldB.io.loop_id =/= head_loop_id &&
+    head_loop.lda_started && ldA.io.idle
+  val forceA = !ab_loads_on_same_loop && ldA.io.loop_id === head_loop_id && !independentBOnly
   val forceB = !ab_loads_on_same_loop && ldB.io.loop_id === head_loop_id
   ldab_arb.io.forceA := Mux(is_resadd, ab_loads_on_same_loop && !ldA.io.idle, forceA)
   ldab_arb.io.forceB := Mux(is_resadd, forceB || ldA.io.idle, forceB) 
@@ -1069,6 +1085,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   // Wire up unrolled command output
   val is_loop_run_cmd = cmd.bits.cmd.inst.funct === LOOP_WS
+  val is_ldb_only_cmd = cmd.bits.cmd.inst.funct === POTAL_LDB_ONLY
   val is_resident_config_cmd = cmd.bits.cmd.inst.funct === POTAL_RESIDENT_VIEW
   val extended_run = is_loop_run_cmd && cmd.bits.cmd.rs1(3)
 
@@ -1082,7 +1099,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       (cmd.bits.cmd.rs1(17, 16) === (buffer + 1).U)
   }
   val is_loop_config_cmd = cmd.bits.cmd.inst.funct >= LOOP_WS_CONFIG_BOUNDS && cmd.bits.cmd.inst.funct <= LOOP_WS_CONFIG_STRIDES_DC
-  val is_loop_cmd = is_loop_run_cmd || is_loop_config_cmd || is_resident_config_cmd
+  val is_loop_cmd = is_loop_run_cmd || is_loop_config_cmd || is_resident_config_cmd || is_ldb_only_cmd
 
   io.out.bits.cmd := Mux(loop_configured, unrolled_cmd.bits, cmd.bits.cmd)
   io.out.bits.cmd.status := cmd.bits.cmd.status // TODO This is not guaranteed to be the correct fix! We must fix this
@@ -1147,7 +1164,11 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     printf(p"[H3_LOOP] loop=${ex.io.loop_id} i=${ex.io.i} kt=${ex.io.k} jt=${ex.io.j} meta=${Hexadecimal(io.out.bits.potal.asUInt)} rs1=${Hexadecimal(io.out.bits.cmd.rs1)} rs2=${Hexadecimal(io.out.bits.cmd.rs2)}\n")
   }
 
-  cmd.ready := !responsePending &&
+  // The legacy resadd selector is global. Never let a later resadd run
+  // reinterpret an already admitted SP load as an accumulator load.
+  val loadOnlyActive = loops.map(l => l.configured && l.loadOnly).reduce(_ || _)
+  val resaddConflictsWithLoadOnly = is_loop_run_cmd && cmd.bits.cmd.rs2(2) && loadOnlyActive
+  cmd.ready := !responsePending && !resaddConflictsWithLoadOnly &&
     Mux(is_loop_cmd, !loop_being_configured.configured, !loop_configured && io.out.ready)
   arb.io.out.ready := io.out.ready
 
@@ -1226,18 +1247,94 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       Mux(!runAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK)))
   val runAccepted = !extended_run || runStatus === PoTalScaleCommandStatus.OK
 
-  when(cmd.fire && (is_resident_config_cmd || extended_run) && cmd.bits.cmd.inst.xd) {
+  // LoadController state 1 is independent of the generator's starting-address
+  // stride. Only a forwarded CONFIG handshake may establish this shadow.
+  val load2ConfigValid = RegInit(false.B)
+  val load2Stride = Reg(UInt(coreMaxAddrBits.W))
+  val canonicalLoad2 = (BigInt(block_size) << 16) | (BigInt(1) << 8) | BigInt(9)
+  when(io.out.fire && io.out.bits.cmd.inst.funct === CONFIG_CMD &&
+      io.out.bits.cmd.rs1(1, 0) === CONFIG_LOAD &&
+      io.out.bits.cmd.rs1(4, 3) === 1.U) {
+    load2ConfigValid := io.out.bits.cmd.rs1 === canonicalLoad2.U(64.W) &&
+      (io.out.bits.cmd.rs2 >> coreMaxAddrBits) === 0.U
+    load2Stride := io.out.bits.cmd.rs2
+  }
+
+  val loadOnlyPair = cmd.bits.cmd.rs1(0)
+  val loadOnlySelector = loadOnlyPair.asUInt +& 1.U
+  val bankRows = max_addr / 4
+  val loadOnlyEnd = loadOnlySelector * (max_addr / 2).U
+  val loadOnlyStart = loadOnlyEnd - bankRows.U
+  val bRows = maxK * block_size.U
+  val bCols = maxJ * block_size.U - loop_being_configured.pad_j
+  val bFootprint = maxK * maxJ * block_size.U
+  // Widen every operation before checking: the LdB generator masks its
+  // tile-start offset to 32 bits, while the DMA row stride has address width.
+  val lastTileOffset = (((maxK - 1.U) * loop_being_configured.b_dram_stride) +&
+    (maxJ - 1.U)) * block_size.U
+  val lastSourceByte = loop_being_configured.b_dram_addr +&
+    ((bRows - 1.U) * loop_being_configured.b_dram_stride) +& (bCols - 1.U)
+  val loadOnlyEncoding = cmd.bits.cmd.inst.xd &&
+    cmd.bits.cmd.rs1 === (16.U(64.W) | loadOnlyPair.asUInt) &&
+    cmd.bits.cmd.rs2 === 0.U &&
+    loop_being_configured.configComplete.andR &&
+    loop_being_configured.loadOnlyConfigValid.andR &&
+    !loop_being_configured.residentStaged
+  // Reserve against future, not yet generated reads as well as current loads.
+  // Indexed loops conservatively own their whole selected B half.
+  val loadOnlyConflict = loops.map { l =>
+    val aBase = Mux(l.a_ex_spad_id === 0.U, l.a_addr_start,
+      (l.a_ex_spad_id - 1.U) * (max_addr / 2).U) +&
+      (l.potalAOffsetTiles * block_size.U)
+    val aEnd = aBase +& (l.max_i * l.max_k * block_size.U)
+    val bEnd = Mux(l.b_ex_spad_id === 0.U, l.b_addr_end,
+      l.b_ex_spad_id * (max_addr / 2).U)
+    val bSize = Mux(l.potalIndexedWeight, (max_addr / 2).U,
+      l.max_k * l.max_j * block_size.U)
+    val bStart = bEnd - bSize
+    l.configured && (l.residentActive ||
+      (!l.loadOnly && (aBase < loadOnlyEnd && aEnd > loadOnlyStart)) ||
+      bSize > bEnd || (bStart < loadOnlyEnd && bEnd > loadOnlyStart))
+  }.reduce(_ || _)
+  val loadOnlyAddress = maxI === 1.U && maxJ > 0.U && maxK > 0.U &&
+    loop_being_configured.pad_i === 0.U && loop_being_configured.pad_k === 0.U &&
+    loop_being_configured.pad_j < block_size.U &&
+    loop_being_configured.a_dram_addr === 0.U &&
+    loop_being_configured.d_dram_addr === 0.U &&
+    loop_being_configured.c_dram_addr === 0.U &&
+    loop_being_configured.a_dram_stride === 0.U &&
+    loop_being_configured.d_dram_stride === 0.U &&
+    loop_being_configured.c_dram_stride === 0.U &&
+    loop_being_configured.b_dram_addr =/= 0.U &&
+    loop_being_configured.b_dram_addr % block_size.U === 0.U &&
+    loop_being_configured.b_dram_stride >= bCols &&
+    bFootprint <= bankRows.U &&
+    lastTileOffset <= "hffffffff".U &&
+    lastSourceByte < (BigInt(1) << coreMaxAddrBits).U &&
+    load2ConfigValid && load2Stride === loop_being_configured.b_dram_stride &&
+    !(is_resadd && loop_configured) && !loadOnlyConflict
+  val loadOnlyStatus = Mux(!ldbOnlySupported.B, PoTalScaleCommandStatus.BAD_COMMAND,
+    Mux(!loadOnlyEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
+      Mux(!loadOnlyAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK)))
+  io.ldbOnlyAdmission.valid := cmd.fire && is_ldb_only_cmd &&
+    loadOnlyStatus === PoTalScaleCommandStatus.OK
+  io.ldbOnlyAdmission.bits := loadOnlyPair
+
+  when(cmd.fire && (is_resident_config_cmd || extended_run || is_ldb_only_cmd) && cmd.bits.cmd.inst.xd) {
     responsePending := true.B
     response.rd := cmd.bits.cmd.inst.rd
-    response.status := Mux(is_resident_config_cmd, viewStatus, runStatus)
+    response.status := Mux(is_ldb_only_cmd, loadOnlyStatus,
+      Mux(is_resident_config_cmd, viewStatus, runStatus))
   }
 
   // Ordered TLB FLUSH invalidates only staged transactions. It is not a drain
   // and must not clear Index ownership, active snapshots, Scale, or Work.
   when(cmd.fire && cmd.bits.cmd.inst.funct === FLUSH_CMD) {
+    load2ConfigValid := false.B
     loops.foreach { loop =>
       loop.residentStaged := false.B
       loop.configComplete := 0.U
+      loop.loadOnlyConfigValid := 0.U
       when(!loop.configured) {
         loop.residentView := 0.U.asTypeOf(new PoTalResidentView)
       }
@@ -1285,6 +1382,13 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     when(is_loop_config_cmd) {
       loop_being_configured.configComplete := loop_being_configured.configComplete |
         UIntToOH(cmd.bits.cmd.inst.funct - LOOP_WS_CONFIG_BOUNDS, 5)
+      val wordMask = UIntToOH(cmd.bits.cmd.inst.funct - LOOP_WS_CONFIG_BOUNDS, 5)
+      val wordFits = Mux(cmd.bits.cmd.inst.funct === LOOP_WS_CONFIG_BOUNDS,
+        !cmd.bits.cmd.rs1(63, 48).orR && !cmd.bits.cmd.rs2(63, 48).orR,
+        (cmd.bits.cmd.rs1 >> coreMaxAddrBits) === 0.U &&
+          (cmd.bits.cmd.rs2 >> coreMaxAddrBits) === 0.U)
+      loop_being_configured.loadOnlyConfigValid :=
+        (loop_being_configured.loadOnlyConfigValid & ~wordMask) | Mux(wordFits, wordMask, 0.U)
     }
 
     when(is_resident_config_cmd) {
@@ -1296,9 +1400,35 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
           view, 0.U.asTypeOf(new PoTalResidentView))
     }
 
-    when(is_loop_run_cmd) {
+    when(is_loop_run_cmd || is_ldb_only_cmd) {
       loop_being_configured.residentStaged := false.B
       loop_being_configured.configComplete := 0.U
+      loop_being_configured.loadOnlyConfigValid := 0.U
+    }
+
+    when(is_ldb_only_cmd && loadOnlyStatus === PoTalScaleCommandStatus.OK) {
+      // Reset all compute/resident/index metadata without changing staged B
+      // dimensions/source. Only LdB starts a real generator for this slot.
+      loop_being_configured.reset()
+      loop_being_configured.loadOnly := true.B
+      loop_being_configured.configured := true.B
+      loop_being_configured.a_ex_spad_id := loadOnlySelector
+      loop_being_configured.b_ex_spad_id := loadOnlySelector
+      loop_being_configured.a_transpose := false.B
+      loop_being_configured.b_transpose := false.B
+      loop_being_configured.ex_accumulate := false.B
+      loop_being_configured.full_c := false.B
+      loop_being_configured.low_d := false.B
+      loop_being_configured.act := 0.U
+      loop_being_configured.lda_started := true.B
+      loop_being_configured.ldd_started := true.B
+      loop_being_configured.ex_started := true.B
+      loop_being_configured.st_started := true.B
+      loop_being_configured.lda_completed := true.B
+      loop_being_configured.ldd_completed := true.B
+      loop_being_configured.ex_completed := true.B
+      loop_being_configured.st_completed := true.B
+      loops_configured := loops_configured + 1.U
     }
 
     switch (cmd.bits.cmd.inst.funct) {
@@ -1334,6 +1464,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
       is (LOOP_WS) {
         when(runAccepted) {
+          loop_being_configured.loadOnly := false.B
           loop_being_configured.residentActive := extended_run
           loop_being_configured.ex_accumulate := cmd.bits.cmd.rs1(0)
           loop_being_configured.full_c := cmd.bits.cmd.rs1(1)
@@ -1477,7 +1608,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldA.io.req.bits.loop_id := loop_requesting_ldA_id
   ldA.io.req.bits.is_resadd := is_resadd
 
-  ldA.io.req.valid := !loop_requesting_ldA.lda_started && loop_requesting_ldA.configured
+  ldA.io.req.valid := !loop_requesting_ldA.loadOnly &&
+    !loop_requesting_ldA.lda_started && loop_requesting_ldA.configured
 
   when (ldA.io.req.fire) {
     loop_requesting_ldA.running := true.B
@@ -1495,7 +1627,12 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ldB.io.req.bits.transpose := loop_requesting_ldB.b_transpose
   ldB.io.req.bits.addr_end := Mux(loop_requesting_ldB.b_ex_spad_id === 0.U, loop_requesting_ldB.b_addr_end, (loop_requesting_ldB.b_ex_spad_id) * (max_addr / concurrent_loops).U)
   ldB.io.req.bits.loop_id := loop_requesting_ldB_id
-  ldB.io.req.bits.is_resadd := is_resadd
+  ldB.io.req.bits.is_resadd := is_resadd && !loop_requesting_ldB.loadOnly
+  when(loop_requesting_ldB.loadOnly) {
+    ldB.io.req.bits.max_k := loop_requesting_ldB.max_k
+    ldB.io.req.bits.pad_k := 0.U
+    ldB.io.req.bits.transpose := false.B
+  }
 
   ldB.io.req.valid := !loop_requesting_ldB.ldb_started && loop_requesting_ldB.configured
 
@@ -1536,7 +1673,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   ex.io.req.bits.loop_id := loop_requesting_ex_id
   ex.io.req.bits.skip := is_resadd
 
-  ex.io.req.valid := !loop_requesting_ex.ex_started && loop_requesting_ex.lda_started &&
+  ex.io.req.valid := !loop_requesting_ex.loadOnly &&
+    !loop_requesting_ex.ex_started && loop_requesting_ex.lda_started &&
     loop_requesting_ex.ldb_started && loop_requesting_ex.ldd_started && loop_requesting_ex.configured 
 
   when (ex.io.req.fire) {
@@ -1565,7 +1703,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   }
   ldD.io.req.bits.loop_id := loop_requesting_ldD_id
 
-  ldD.io.req.valid := !loop_requesting_ldD.ldd_started && loop_requesting_ldD.configured
+  ldD.io.req.valid := !loop_requesting_ldD.loadOnly &&
+    !loop_requesting_ldD.ldd_started && loop_requesting_ldD.configured
 
   when (ldD.io.req.fire) {
     loop_requesting_ldD.running := true.B
@@ -1597,7 +1736,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   stC.io.req.bits.is_resadd := is_resadd
 
 
-  stC.io.req.valid := !loop_requesting_st.st_started && loop_requesting_st.ex_started && loop_requesting_st.configured
+  stC.io.req.valid := !loop_requesting_st.loadOnly &&
+    !loop_requesting_st.st_started && loop_requesting_st.ex_started && loop_requesting_st.configured
 
   when (stC.io.req.fire) {
     loop_requesting_st.running := true.B
@@ -1611,9 +1751,12 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   when(is_resadd){
     ldA.io.req.bits.addr_start := loop_requesting_ldA.resadd_addr_start
-    ldB.io.req.bits.addr_end := loop_requesting_ldB.resadd_addr_start
+    when(!loop_requesting_ldB.loadOnly) {
+      ldB.io.req.bits.addr_end := loop_requesting_ldB.resadd_addr_start
+    }
     stC.io.req.bits.addr_start := loop_requesting_st.resadd_addr_start
-    stC.io.req.valid := !loop_requesting_st.st_started && loop_requesting_st.configured
+    stC.io.req.valid := !loop_requesting_st.loadOnly &&
+      !loop_requesting_st.st_started && loop_requesting_st.configured
   }
   // Handle completed signals
   when (ldA.io.idle && loops(ldA.io.loop_id).running && loops(ldA.io.loop_id).lda_started) {
@@ -1658,12 +1801,13 @@ object LoopMatmul {
             max_addr: Int, max_acc_addr: Int, input_w: Int, acc_w: Int, dma_max_bytes: Int,
             mvin_rs2_t: MvinRs2, preload_rs1_t: PreloadRs, preload_rs2_t: PreloadRs,
             compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int,
-            residentViewSupported: Boolean, indexDescriptors: Vec[PoTalIndexConfig], indexComplete: Vec[Bool])
-           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool], DecoupledIO[PoTalScaleCommandResponse]) = {
+            residentViewSupported: Boolean, indexDescriptors: Vec[PoTalIndexConfig], indexComplete: Vec[Bool],
+            ldbOnlySupported: Boolean = false)
+           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool], DecoupledIO[PoTalScaleCommandResponse], ValidIO[UInt]) = {
     val mod = Module(new LoopMatmul(block_size, coreMaxAddrBits, rob_size, max_lds, max_exs, max_sts,
       max_addr, max_acc_addr, input_w, acc_w, dma_max_bytes,
       mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries,
-      residentViewSupported))
+      residentViewSupported, ldbOnlySupported))
     mod.io.in <> in
     mod.io.ld_completed := ld_completed
     mod.io.st_completed := st_completed
@@ -1675,7 +1819,8 @@ object LoopMatmul {
       mod.io.busy,
       mod.io.indexedLoopActive,
       mod.io.indexedLoopConfigured,
-      mod.io.resp
+      mod.io.resp,
+      mod.io.ldbOnlyAdmission
     )
   }
 

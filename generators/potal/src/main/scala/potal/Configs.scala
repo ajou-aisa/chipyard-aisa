@@ -20,6 +20,23 @@ import hardfloat._
 // Observation is opt-in and does not change GemminiArrayConfig/header geometry.
 case object PoTalPrefetchObservationEnabled extends Field[Boolean](false)
 
+case object PoTalEarlyPrefetchEnabled extends Field[Boolean](false)
+
+// Separate from both resident-view and physical-observation capabilities.
+object PoTalLdbOnlyCapability {
+  val Query = BigInt("504f4c4400000000", 16)
+  val Signature = BigInt("504f4c4401200001", 16)
+  val TraceReset = Query | BigInt(0x100)
+  val TraceRead = Query | BigInt(0x200)
+  val TraceFields = 28
+
+  def supported[T <: Data, U <: Data, V <: Data](
+    config: GemminiArrayConfig[T, U, V], xLen: Int,
+    enabled: Boolean, observationEnabled: Boolean
+  ): Boolean =
+    enabled && PoTalPrefetchCapability.supported(config, xLen, observationEnabled)
+}
+
 object GemminiConfigs {
   val defaultConfig = GemminiArrayConfig[SInt, Float, Float](
     // Datatypes

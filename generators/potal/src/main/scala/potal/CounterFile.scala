@@ -244,13 +244,36 @@ class CounterFile(nPerfCounter: Int, counterWidth: Int) extends Module
   }
 }
 
+class PoTalLdbOnlyEvents extends Bundle {
+  val admission = Valid(UInt(1.W))
+  val bWrite = Vec(2, Bool())
+  val dmaRequest = Vec(2, Bool())
+  val mac = Vec(2, Bool())
+  val drained = Bool()
+  val fenceRequest = Bool()
+  val fenceAccepted = Bool()
+}
+
+object PoTalTraceReset {
+  def canonical(cmd: RoCCCommand): Bool =
+    cmd.inst.funct === COUNTER_OP && cmd.inst.xd && cmd.rs2 === 0.U &&
+      cmd.rs1 === PoTalLdbOnlyCapability.TraceReset.U(64.W)
+
+  // Only the diagnostic reset's own unrolled head is exempt. All other
+  // queue, scheduler, controller, Scratchpad and writeback drains stay required.
+  def drained(head: DecoupledIO[GemminiCmd], otherDrained: Bool, supported: Boolean): Bool =
+    otherDrained && (!head.valid || (supported.B && canonical(head.bits.cmd)))
+}
+
 class CounterController(nPerfCounter: Int, counterWidth: Int,
                         residentViewSupported: Boolean = false,
-                        prefetchObservationSupported: Boolean = false)(implicit p: Parameters) extends Module {
+                        prefetchObservationSupported: Boolean = false,
+                        ldbOnlySupported: Boolean = false)(implicit p: Parameters) extends Module {
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new RoCCCommand))
     val out = Decoupled(new RoCCResponse)
     val event_io = Flipped(new CounterEventIO)
+    val earlyEvents = if (ldbOnlySupported) Some(Input(new PoTalLdbOnlyEvents)) else None
   })
 
   if (nPerfCounter > 0) {
@@ -269,7 +292,87 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
       io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
       io.in.bits.rs1 === PoTalPrefetchCapability.Query.U(64.W) &&
       io.in.bits.rs2 === 0.U
-    val capabilityRead = residentCapabilityRead || observationCapabilityRead
+    val ldbOnlyCapabilityRead = (ldbOnlySupported && counterWidth == 64).B &&
+      io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
+      io.in.bits.rs1 === PoTalLdbOnlyCapability.Query.U(64.W) &&
+      io.in.bits.rs2 === 0.U
+    val traceReset = ldbOnlySupported.B && PoTalTraceReset.canonical(io.in.bits)
+    val traceRead = ldbOnlySupported.B && io.in.bits.inst.funct === COUNTER_OP &&
+      io.in.bits.inst.xd && io.in.bits.rs2 === 0.U &&
+      io.in.bits.rs1(63, 5) === (PoTalLdbOnlyCapability.TraceRead >> 5).U
+    val traceData = WireDefault(0.U(64.W))
+    if (ldbOnlySupported) {
+      val events = io.earlyEvents.get
+      val clockCycle = RegInit(0.U(64.W))
+      when(!clockCycle.andR) { clockCycle := clockCycle + 1.U }
+      val armed = RegInit(false.B)
+      val overflow = RegInit(false.B)
+      val start = RegInit(0.U(64.W))
+      val end = RegInit(0.U(64.W))
+      val pair = RegInit(0.U(1.W))
+      val seen = RegInit(VecInit(Seq.fill(10)(false.B)))
+      val first = RegInit(VecInit(Seq.fill(10)(0.U(64.W))))
+      val last = RegInit(VecInit(Seq.fill(10)(0.U(64.W))))
+      val counts = RegInit(VecInit(Seq.fill(7)(0.U(64.W))))
+      val cross0 = events.mac(0) && events.bWrite(1)
+      val cross1 = events.mac(1) && events.bWrite(0)
+      val timestamps = Seq(events.admission.valid, events.bWrite(0), events.bWrite(1),
+        events.mac(0), events.mac(1), events.fenceRequest, events.fenceAccepted, !events.drained,
+        events.dmaRequest(0), events.dmaRequest(1))
+      val increments = Seq(events.bWrite(0), events.bWrite(1), events.mac(0), events.mac(1),
+        cross0, cross1, cross0 || cross1)
+      // Reset is admitted only at the same real global-drain boundary as Fence.
+      // Freeze at the first accepted Fence; reads cannot create a certificate.
+      when(traceReset && io.in.fire && events.drained) {
+        armed := true.B
+        overflow := clockCycle.andR
+        start := clockCycle
+        end := clockCycle
+        pair := 0.U
+        seen.foreach(_ := false.B)
+        first.foreach(_ := 0.U)
+        last.foreach(_ := 0.U)
+        counts.foreach(_ := 0.U)
+      }.elsewhen(armed) {
+        when(clockCycle.andR) { overflow := true.B }
+        for (i <- timestamps.indices) {
+          when(timestamps(i)) {
+            when(!seen(i)) { first(i) := clockCycle }
+            seen(i) := true.B
+            last(i) := clockCycle
+          }
+        }
+        when(events.admission.valid) { pair := events.admission.bits }
+        for (i <- increments.indices) {
+          when(increments(i)) {
+            when(counts(i).andR) { overflow := true.B }
+              .otherwise { counts(i) := counts(i) + 1.U }
+          }
+        }
+        when(events.fenceAccepted) {
+          armed := false.B
+          end := clockCycle
+        }
+      }
+      val values = Wire(Vec(32, UInt(64.W)))
+      values.foreach(_ := 0.U)
+      values(0) := Cat(0.U(43.W), pair, 0.U(2.W), seen.asUInt, 0.U(6.W), overflow, armed)
+      values(1) := Mux(armed, clockCycle, end) - start
+      values(2) := first(0) // Scheduler admission, not DMA request/admission.
+      values(3) := first(1); values(4) := last(1)
+      values(5) := first(2); values(6) := last(2)
+      values(7) := first(3); values(8) := last(3)
+      values(9) := first(4); values(10) := last(4)
+      for (i <- counts.indices) { values(11 + i) := counts(i) }
+      values(18) := first(5); values(19) := first(6)
+      values(20) := first(7); values(21) := last(7)
+      values(22) := start; values(23) := end
+      values(24) := first(8); values(25) := last(8)
+      values(26) := first(9); values(27) := last(9)
+      traceData := Mux(traceReset, events.drained.asUInt, values(io.in.bits.rs1(4, 0)))
+    }
+    val capabilityRead = residentCapabilityRead || observationCapabilityRead || ldbOnlyCapabilityRead ||
+      traceReset || traceRead
 
     // Decode access option (assume 8 counters)
     // rs1[0] = Global counter value reset
@@ -296,8 +399,10 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
       out_valid_reg := true.B
       out_reg.rd := io.in.bits.inst.rd
       out_reg.data := 0.U
-      out_reg.data := Mux(observationCapabilityRead, PoTalPrefetchCapability.Signature.U(64.W),
-        Mux(residentCapabilityRead, PoTalResidentCapability.Signature.U(64.W), counterfile.io.data))
+      out_reg.data := Mux(traceReset || traceRead, traceData,
+        Mux(ldbOnlyCapabilityRead, PoTalLdbOnlyCapability.Signature.U(64.W),
+        Mux(observationCapabilityRead, PoTalPrefetchCapability.Signature.U(64.W),
+          Mux(residentCapabilityRead, PoTalResidentCapability.Signature.U(64.W), counterfile.io.data))))
     }
 
     io.out.valid := out_valid_reg

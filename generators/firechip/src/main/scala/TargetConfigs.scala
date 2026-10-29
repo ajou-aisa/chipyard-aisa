@@ -352,6 +352,15 @@ class FireSimQuadRocketSinglePoTalD32PrefetchObservationConfig extends Config(
   new FireSimPoTalD32PrefetchObservationRocketConfig
 )
 
+// Inherit D2 geometry, RoCC placement and bridge/memory clocks. Use the same
+// external 30 MHz host build profile; no target clock override is introduced.
+class FireSimQuadRocketSinglePoTalD32EarlyPrefetchObservationConfig extends Config(
+  new Config((site, here, up) => {
+    case potal.PoTalEarlyPrefetchEnabled => true
+  }) ++
+  new FireSimQuadRocketSinglePoTalD32PrefetchObservationConfig
+)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************

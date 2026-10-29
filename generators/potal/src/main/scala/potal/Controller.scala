@@ -65,13 +65,20 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     outer.config, outer.xLen, p(PoTalPrefetchObservationEnabled))
   require(!p(PoTalPrefetchObservationEnabled) || prefetchObservationSupported,
     "PoTal prefetch observation requires the supported DIM32 physical geometry")
+  val ldbOnlySupported = PoTalLdbOnlyCapability.supported(outer.config, outer.xLen,
+    p(PoTalEarlyPrefetchEnabled), p(PoTalPrefetchObservationEnabled))
+  require(!p(PoTalEarlyPrefetchEnabled) || ldbOnlySupported,
+    "PoTal early prefetch requires the supported DIM32 observation geometry")
   val counters = Module(new CounterController(outer.config.num_counter, outer.xLen,
-    residentViewSupported, prefetchObservationSupported))
+    residentViewSupported, prefetchObservationSupported, ldbOnlySupported))
   counters.io.event_io.external_values(0) := 0.U
   counters.io.event_io.event_signal(0) := false.B
   counters.io.in.valid := false.B
   counters.io.in.bits := DontCare
   counters.io.event_io.collect(spad.module.io.counter)
+  val earlyTraceDrained = WireDefault(false.B)
+  val earlyTraceFenceRequest = WireDefault(false.B)
+  val earlyTraceFenceAccepted = WireDefault(false.B)
 
   // TLB
   implicit val edge = outer.spad.id_node.edges.out.head
@@ -302,13 +309,20 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     residentIndexComplete := ingress.io.indexComplete
   }
 
-  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured, loop_response) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
+  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured, loop_response, ldbOnlyAdmission) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
     meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t), potalScaleEntries,
-    residentViewSupported, residentIndexDescriptors, residentIndexComplete) }
+     residentViewSupported, residentIndexDescriptors, residentIndexComplete, ldbOnlySupported) }
+  counters.io.earlyEvents.foreach { events =>
+    events := 0.U.asTypeOf(events)
+    events.admission := ldbOnlyAdmission
+    events.drained := earlyTraceDrained
+    events.fenceRequest := earlyTraceFenceRequest
+    events.fenceAccepted := earlyTraceFenceAccepted
+  }
 
   val unrolled_cmd = Queue(loop_cmd)
   unrolled_cmd.ready := false.B
@@ -804,17 +818,19 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   
   // Do not include raw_cmd.valid:
   // the current RELEASE/FENCE command occupies raw_cmd.
-  val olderGemminiDrained =
+  val olderGemminiDrainedExceptUnrolled =
     !loop_conv_unroller_busy &&
     !loop_matmul_unroller_busy &&
     !conv_cmd.valid &&
     !loop_cmd.valid &&
-    !unrolled_cmd.valid &&
     reservation_station.io.drained &&
     !load_controller.io.busy &&
     !store_controller.io.busy &&
     !ex_controller.io.busy &&
     !spad.module.io.busy
+
+  val olderGemminiDrained =
+    olderGemminiDrainedExceptUnrolled && !unrolled_cmd.valid
 
   potalIngressOpt.zip(potalWritebackOpt).foreach {
     case (ingress, wb) =>
@@ -823,6 +839,14 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
 
       ingress.io.releaseSafe := allDrained
       ingress.io.fenceDrained := allDrained
+      // COUNTER reaches this queue, unlike the intercepted Fence/Release.
+      // Exclude only canonical TraceReset's own head, never older work.
+      earlyTraceDrained := PoTalTraceReset.drained(unrolled_cmd,
+        olderGemminiDrainedExceptUnrolled && wb.io.drained, ldbOnlySupported)
+      earlyTraceFenceRequest := ingress.io.cmd.valid && ingress.io.cmd.bits.funct === POTAL_FENCE
+      earlyTraceFenceAccepted := ingress.io.cmd.fire && ingress.io.cmd.bits.funct === POTAL_FENCE &&
+        ingress.io.cmd.bits.xd && ingress.io.cmd.bits.rs1 === 0.U &&
+        ingress.io.cmd.bits.rs2 === 0.U && allDrained
   }
 
   // ============================================================
@@ -1019,6 +1043,18 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     }
     PoTalPrefetchObservation.connect(counters.io.event_io,
       bWrites(0), bWrites(1), ex_controller.io.qualifiedMac.get)
+    counters.io.earlyEvents.foreach { events =>
+      events.bWrite := VecInit(bWrites)
+      for (pair <- 0 until 2) {
+        val mac = ex_controller.io.qualifiedMac.get
+        events.mac(pair) := mac.valid && mac.bits === (pair == 1).B
+        val request = spad.module.io.dma.read.req
+        // Actual LoadController -> Scratchpad DMA-request acceptance, not
+        // TileLink request issue or DRAM response completion.
+        events.dmaRequest(pair) := request.fire && !request.bits.all_zeros &&
+          !request.bits.laddr.is_acc_addr && request.bits.laddr.sp_bank() === (2 * pair + 1).U
+      }
+    }
   } else {
     for (event <- CounterEvent.POTAL_B0_DMA_WRITE until CounterEvent.n) {
       counters.io.event_io.connectEventSignal(event, false.B)
