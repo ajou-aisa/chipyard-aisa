@@ -5,10 +5,10 @@ import chisel3.iotesters._
 
 class PoTalWritebackTester(
   dut: PoTalWriteback[SInt, Float, Float],
-  scenario: Int
+  scenario: Int,
+  dim: Int = 16
 ) extends PeekPokeTester(dut) {
   private val zero = BigInt("80000000", 16)
-  private val dim = 16
 
   for (bank <- 0 until 2) {
     poke(dut.io.rawWrite(bank).valid, 0)
@@ -442,21 +442,22 @@ class PoTalWritebackTester(
 class PoTalWritebackSpec extends ChiselFlatSpec {
   behavior of "PoTalWriteback"
 
-  for (scenario <- 0 until 5) {
-    it should s"preserve K32 scale, row credit and completion scenario $scenario" in {
-      val cfg = GemminiConfigs.defaultConfig.copy(
+  for (dim <- Seq(16, 32); scenario <- 0 until 5) {
+    it should s"preserve scale, row credit and completion DIM$dim scenario $scenario" in {
+      val base = if (dim == 16) GemminiConfigs.defaultConfig else PoTalConfigs.a8w8D32Sat32
+      val cfg = base.copy(
         dataflow = Dataflow.WS,
         reservation_station_entries_ex = 2,
         acc_latency = 2)
-      val depth = if (scenario == 3) 16 else 32
+      val depth = if (scenario == 3) dim else 2 * dim
 
       Driver.execute(
         Array("--backend-name", "treadle", "--target-dir",
-          s"test_run_dir/potal-writeback-$scenario"),
+          s"test_run_dir/h3-8-potal-writeback-d$dim-$scenario"),
         () => new PoTalWriteback(cfg,
           scaleEntries=4, generationWidth=4, workEntries=4,
           contextDepth=2, queueDepth=depth)
-      ) { dut => new PoTalWritebackTester(dut, scenario) } should be (true)
+      ) { dut => new PoTalWritebackTester(dut, scenario, dim) } should be (true)
     }
   }
 }

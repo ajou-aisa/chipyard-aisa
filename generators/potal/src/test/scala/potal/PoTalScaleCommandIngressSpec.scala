@@ -38,12 +38,17 @@ final class PoTalScaleIngressHarness(
 
     val lookupHit = Output(Bool())
     val lookupCarrier = Output(UInt(32.W))
+    val indexComplete = Output(Vec(2, Bool()))
+    val indexConfigured = Output(Vec(2, Bool()))
+    val indexDescriptors = Output(Vec(2, new PoTalIndexConfig))
   })
 
   val ingress = Module(
     new PoTalScaleCommandIngress(
       dim = dim,
       scaleEntries = entries,
+      indexEntries = PoTalConfigs.a8w8Sat32(dim).potalIndexEntries,
+      spRows = PoTalConfigs.a8w8Sat32(dim).potalSpRows,
       generationWidth = 8
     )
   )
@@ -58,6 +63,10 @@ final class PoTalScaleIngressHarness(
 
   ingress.io.releaseSafe := io.releaseSafe
   ingress.io.fenceDrained := io.fenceDrained
+  ingress.io.indexUpdateSafe.foreach(_ := io.fenceDrained)
+  io.indexComplete := ingress.io.indexComplete
+  io.indexConfigured := ingress.io.indexConfiguredByBuffer
+  io.indexDescriptors := ingress.io.indexDescriptors
 
   // Match the ScaleMemory wiring currently used
   // inside PoTalWriteback.

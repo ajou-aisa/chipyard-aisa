@@ -322,6 +322,22 @@ class FireSimQuadRocketSinglePoTalD16Config extends Config(
   new FireSimPoTalD16RocketConfig
 )
 
+// PoTal A8W8 / DIM32 / WS / Sat32, retaining the DIM16 clocks and memory model.
+class FireSimPoTalD32RocketConfig extends Config(
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.PoTalSat32D32GemminiRocketConfig
+)
+
+// Four Rocket harts, one PoTal accelerator on hart 0.
+class FireSimQuadRocketSinglePoTalD32Config extends Config(
+  new chipyard.config.WithMultiRoCC ++
+  new chipyard.config.WithMultiRoCCFromBuildRoCC(0) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(3) ++
+  new FireSimPoTalD32RocketConfig
+)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************

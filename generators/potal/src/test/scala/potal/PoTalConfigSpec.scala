@@ -88,5 +88,40 @@ class PoTalConfigSpec extends AnyFlatSpec with Matchers {
     baseline.dataflow shouldBe Dataflow.BOTH
     baseline.headerFileName shouldBe "gemmini_params.h"
   }
+
+  it should "derive DIM32 geometry from the same byte capacities" in {
+    val d32 = PoTalConfigs.a8w8D32Sat32
+    d32.DIM shouldBe 32
+    d32.dataflow shouldBe Dataflow.WS
+    d32.inputType.getWidth shouldBe 8
+    d32.spatialArrayOutputType.getWidth shouldBe 21
+    d32.accType.getWidth shouldBe 32
+    d32.sp_banks shouldBe 4
+    d32.sp_bank_entries shouldBe 2048
+    d32.acc_banks shouldBe 2
+    d32.acc_bank_entries shouldBe 256
+    d32.acc_sub_banks shouldBe 2
+    d32.dma_maxbytes shouldBe 64
+    d32.dma_buswidth shouldBe 128
+    d32.enablePoTalSat32Acc shouldBe true
+    d32.potalScaleEntries shouldBe 256
+    d32.potalIndexEntries shouldBe 64
+    PoTalProtocol.passesPerBlock(d32.DIM, 32) shouldBe 1
+    val header = d32.generateHeader()
+    header should include ("#define DIM 32")
+    header should include ("#define BANK_ROWS 2048")
+    header should include ("#define ACC_ROWS 512")
+    header should include ("#define POTAL_INDEX_ENTRIES 64")
+    d32.headerFileName shouldBe "gemmini_potal_d32_params.h"
+  }
 }
 
+// Isolated parameter generation uses the same RTL configuration and generator
+// as Controller elaboration, without touching an existing source header.
+object PoTalDim32Header extends App {
+  require(args.length == 1, "Provide one output path for the DIM32 parameter header")
+  val path = java.nio.file.Paths.get(args(0))
+  java.nio.file.Files.write(path,
+    PoTalConfigs.a8w8D32Sat32.generateHeader().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+  println(s"POTAL_DIM32_HEADER=$path")
+}

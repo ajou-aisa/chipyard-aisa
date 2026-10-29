@@ -79,7 +79,9 @@ final class PoTalDrainHandshakeHarness extends Module {
   })
 
   val ingress = Module(new PoTalScaleCommandIngress(
-    dim = dim, scaleEntries = 8, generationWidth = 8))
+    dim = dim, scaleEntries = 8,
+    indexEntries = config.potalIndexEntries, spRows = config.potalSpRows,
+    generationWidth = 8))
 
   val wb = Module(new PoTalWriteback(
     config,
@@ -103,6 +105,7 @@ final class PoTalDrainHandshakeHarness extends Module {
   val allDrained = io.olderGemminiDrained && wb.io.drained
   ingress.io.releaseSafe := allDrained
   ingress.io.fenceDrained := allDrained
+  ingress.io.indexUpdateSafe.foreach(_ := allDrained)
   io.allDrained := allDrained
   io.scaleLoadFire := ingress.io.scaleLoad.fire
   io.scaleReleaseFire := ingress.io.scaleRelease.fire

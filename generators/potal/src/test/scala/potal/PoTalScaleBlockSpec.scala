@@ -89,6 +89,7 @@ class PoTalScaleBlockSpec extends ChiselFlatSpec {
 
   val cases = Seq(
     (16, 32, 5),
+    (32, 32, 5),
     (32, 96, 7),
     (64, 64, 3),
     (64, 128, 5)
@@ -118,6 +119,7 @@ class PoTalScaleBlockSpec extends ChiselFlatSpec {
 
   it should "reject misaligned scale block sizes" in {
     assert(PoTalProtocol.passesPerBlock(16, 32) == 2)
+    assert(PoTalProtocol.passesPerBlock(32, 32) == 1)
     assert(PoTalProtocol.passesPerBlock(32, 96) == 3)
     assert(PoTalProtocol.passesPerBlock(64, 64) == 1)
     assert(PoTalProtocol.passesPerBlock(64, 128) == 2)
