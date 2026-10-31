@@ -19,6 +19,8 @@ final class PoTalPreloadReservationGateTester(
   poke(dut.io.validColumns, dim)
 
   poke(dut.io.metadata.valid, 0)
+  poke(dut.io.metadata.stream.valid, 0)
+  poke(dut.io.metadata.startsWork, 0)
   poke(dut.io.metadata.workId, 11)
   poke(dut.io.metadata.blockIndex, 3)
   poke(dut.io.metadata.scaleBase, 20)

@@ -76,6 +76,8 @@ final class PoTalPreloadReservationGate(
 
   io.contextIssue.bits.robId :=
     io.robId
+  io.contextIssue.bits.stream := io.metadata.stream
+  io.contextIssue.bits.startsWork := io.metadata.startsWork
 
   io.contextIssue.bits.workId :=
     io.metadata.workId

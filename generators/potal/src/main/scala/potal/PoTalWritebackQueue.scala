@@ -16,6 +16,7 @@ final class PoTalWriteEntry(
   val accRow = UInt(rowWidth.W)
   val accumulate = Bool()
   val workId = UInt(workWidth.W)
+  val stream = new PoTalStreamTag
   val robId = UInt(robWidth.W)
   val completesCommand = Bool()
 }

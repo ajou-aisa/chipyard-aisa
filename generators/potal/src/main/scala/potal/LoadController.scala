@@ -85,6 +85,7 @@ class LoadController[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig
 
   val deps_t = new Bundle {
     val rob_id = UInt(log2Up(reservation_station_entries).W)
+    val stream = new PoTalStreamTag
   }
 
   val maxBytesInRowRequest = config.dma_maxbytes max (block_cols * config.inputType.getWidth / 8) max
@@ -109,6 +110,9 @@ class LoadController[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig
   io.dma.req.bits.all_zeros := all_zeros
   io.dma.req.bits.status := mstatus
   io.dma.req.bits.pixel_repeats := pixel_repeat
+  io.dma.req.bits.stream := cmd.bits.potal.stream
+  PoTalStream.trace("load_request", io.dma.req.fire, io.dma.req.bits.stream)
+  PoTalStream.trace("returned_bytes", io.dma.resp.fire, io.dma.resp.bits.stream)
 
   // Command tracker IO
   cmd_tracker.io.alloc.valid := control_state === waiting_for_command && cmd.valid && DoLoad
@@ -116,6 +120,17 @@ class LoadController[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig
     Mux(io.dma.req.bits.has_acc_bitwidth, cols * actual_rows_read * config.accType.getWidth.U,
       cols * actual_rows_read * config.inputType.getWidth.U) >> 3 // We replaced a very clear "/ 8.U" operation here with a ">> 3" operation, solely to satisfy Verilator's linter
   cmd_tracker.io.alloc.bits.tag.rob_id := cmd.bits.rob_id.bits
+  cmd_tracker.io.alloc.bits.tag.stream := cmd.bits.potal.stream
+  // The DMA command slot remains live until every returned byte and response
+  // handshake. Check returned identities before releasing the RS reference.
+  val dmaTags = Reg(Vec(nCmds, new PoTalStreamTag))
+  when(cmd_tracker.io.alloc.fire()) {
+    dmaTags(cmd_tracker.io.alloc.bits.cmd_id) := cmd.bits.potal.stream
+  }
+  when(io.dma.resp.fire && io.dma.resp.bits.stream.valid) {
+    assert(dmaTags(io.dma.resp.bits.cmd_id).asUInt === io.dma.resp.bits.stream.asUInt,
+      "PoTal DMA returned stale stream identity")
+  }
   cmd_tracker.io.request_returned.valid := io.dma.resp.fire // TODO use a bundle connect
   cmd_tracker.io.request_returned.bits.cmd_id := io.dma.resp.bits.cmd_id // TODO use a bundle connect
   cmd_tracker.io.request_returned.bits.bytes_read := io.dma.resp.bits.bytesRead

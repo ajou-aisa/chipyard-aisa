@@ -236,7 +236,7 @@ lazy val gemmini = (project in file("generators/gemmini"))
   .settings(commonSettings)
 
 lazy val potal = (project in file("generators/potal"))
-  .dependsOn(rocketchip)
+  .dependsOn(rocketchip, midas)
   .settings(libraryDependencies ++= rocketLibDeps.value)
   .settings(chiselTestSettings)
   .settings(commonSettings)
@@ -257,6 +257,8 @@ lazy val potal = (project in file("generators/potal"))
         "PoTalResidentTestSupport.scala",
         "PoTalPrefetchOverlapSpec.scala",
         "PoTalLdbOnlySpec.scala",
+        "PoTalStreamSpec.scala",
+        "PoTalStreamIndexedHazardTester.scala",
         "PoTalAccPipeSpec.scala",
         "PoTalAccumulatorRMWSpec.scala",
         "PoTalPreloadReservationGateSpec.scala",

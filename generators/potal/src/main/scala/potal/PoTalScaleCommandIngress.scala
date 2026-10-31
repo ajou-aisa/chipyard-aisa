@@ -369,6 +369,7 @@ final class PoTalScaleCommandIngress(
 
   io.scaleRelease.bits.column :=
     column(columnWidth - 1, 0)
+  io.scaleRelease.bits.scoped := false.B
 
   io.scaleRelease.bits.address :=
     address(slotWidth - 1, 0)

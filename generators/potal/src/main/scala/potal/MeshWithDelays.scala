@@ -15,6 +15,7 @@ class MeshWithDelaysReq[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](ac
   val tag = tagType
   val flush = UInt(2.W) // TODO magic number
   val computeUseful = if (observePrefetch) Some(Bool()) else None
+  val computeStream = if (observePrefetch) Some(new PoTalStreamTag) else None
 
 }
 
@@ -67,6 +68,7 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
     val aObservation = if (observePrefetch) Some(Input(Valid(Bool()))) else None
     val dObservation = if (observePrefetch) Some(Input(Valid(Bool()))) else None
     val qualifiedMac = if (observePrefetch) Some(Output(Valid(Bool()))) else None
+    val qualifiedMacStream = if (observePrefetch) Some(Output(new PoTalStreamTag)) else None
 
     val resp = Valid(new MeshWithDelaysResp(outputType, meshColumns, tileColumns, block_size, tagType.cloneType))
 
@@ -188,6 +190,15 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
     observation.compute := rowValid && req.bits.computeUseful.get
     // Row/column zero have zero skew in shifted(); Mesh adds tile_latency+1.
     io.qualifiedMac.get := observation.mac
+    // This is the consuming COMPUTE tag, not the simultaneously offered
+    // PRELOAD output tag. Match the PE00 control/register latency exactly.
+    val stream = ShiftRegister(req.bits.computeStream.get, tile_latency + 1)
+    io.qualifiedMacStream.get := stream
+    io.qualifiedMacStream.get.valid := observation.mac.valid && stream.valid
+    when(io.qualifiedMacStream.get.valid) {
+      assert(stream.pair === observation.mac.bits, "stream MAC operand pair mismatch")
+    }
+    PoTalStream.trace("pe00_mac", io.qualifiedMacStream.get.valid, stream)
   }
 
   // TODO wire only to *_buf here, instead of io.*.bits

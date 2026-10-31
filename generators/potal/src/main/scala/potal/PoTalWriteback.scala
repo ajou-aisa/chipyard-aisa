@@ -15,6 +15,8 @@ final class PoTalOutputContext(
   generationWidth: Int
 ) extends Bundle {
   val robId = UInt(robWidth.W)
+  val stream = new PoTalStreamTag
+  val startsWork = Bool()
   val workId = UInt(workWidth.W)
   val blockIndex = UInt(16.W)
   val scaleBase = UInt(16.W)
@@ -43,6 +45,7 @@ final class PoTalScaleRelease(
   entries: Int,
   generationWidth: Int
 ) extends Bundle {
+  val scoped = Bool()
   val column = UInt(math.max(1, log2Ceil(dim)).W)
   val address = UInt(math.max(1, log2Ceil(entries)).W)
   val generation = UInt(generationWidth.W)
@@ -109,6 +112,8 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
       dim, scaleEntries, generationWidth)))
     val robCompletion = Decoupled(UInt(robWidth.W))
     val workDone = Decoupled(UInt(workWidth.W))
+    val streamWorkStart = Output(Valid(new PoTalStreamTag))
+    val streamWorkDone = Output(Valid(new PoTalStreamTag))
     val pipelineDrained = Output(Bool())
     val drained = Output(Bool())
     val error = Output(new Bundle {
@@ -134,12 +139,23 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
   private val pendingRob = RegInit(VecInit(Seq.fill(robEntries)(false.B)))
   private val rawDone = RegInit(VecInit(Seq.fill(robEntries)(false.B)))
   private val writeDone = RegInit(VecInit(Seq.fill(robEntries)(false.B)))
+  private val workTags = Reg(Vec(workEntries, new PoTalStreamTag))
 
   // Scale cache: one independent carrier per output column.
   io.scaleLoad.ready := VecInit(scales.map(_.io.write.ready))(
     io.scaleLoad.bits.column)
-  io.scaleRelease.ready := contexts.io.count === 0.U &&
+  private val legacyReleaseReady = contexts.io.count === 0.U &&
     !io.contextIssue.valid && !io.rawWrite.map(_.valid).reduce(_ || _)
+  // Keep the Scale generation owned through workDone, including queued SCU
+  // output and delayed ACC commits. Unrelated generations do not block.
+  private val releaseGenerationBusy = tracker.io.active.zip(workTags).map {
+    case (active, tag) => active && (!tag.valid ||
+      tag.generation === io.scaleRelease.bits.generation)
+  }.reduce(_ || _)
+  io.scaleRelease.ready := Mux(io.scaleRelease.bits.scoped,
+    !releaseGenerationBusy && !(io.contextIssue.valid &&
+      io.contextIssue.bits.scaleGeneration === io.scaleRelease.bits.generation),
+    legacyReleaseReady)
 
   private val rawValid = io.rawWrite.map(_.valid).reduce(_ || _)
   private val rawBank = PriorityEncoder(VecInit(io.rawWrite.map(_.valid)))
@@ -183,9 +199,14 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
     column.U >= activeColumns || m.io.hit
   }.reduce(_ && _)
 
-  private val needsAllocation = !tracker.io.active(incoming.workId)
+  private val needsAllocation = !tracker.io.active(incoming.workId) ||
+    (incoming.stream.valid && incoming.startsWork)
+  private val continuationMatches = !incoming.stream.valid || incoming.startsWork ||
+    (tracker.io.active(incoming.workId) &&
+      workTags(incoming.workId).asUInt === incoming.stream.asUInt)
   private val admit = !rawValid && shapeValid && scaleHit &&
     !pendingRob(incoming.robId) &&
+    continuationMatches &&
     (!needsAllocation || tracker.io.allocate.ready)
 
   writes.io.reserveRows.bits := incoming.validRows
@@ -200,11 +221,18 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
 
   tracker.io.allocate.valid := io.contextIssue.fire && needsAllocation
   tracker.io.allocate.bits := incoming.workId
+  when(tracker.io.allocate.fire) { workTags(incoming.workId) := incoming.stream }
   tracker.io.issue.valid := io.contextIssue.fire
   tracker.io.issue.bits := incoming.workId
   tracker.io.seal.valid := io.contextIssue.fire && incoming.lastContribution
   tracker.io.seal.bits := incoming.workId
   io.workDone <> tracker.io.done
+  io.streamWorkStart.valid := tracker.io.allocate.fire && incoming.stream.valid
+  io.streamWorkStart.bits := incoming.stream
+  io.streamWorkDone.valid := io.workDone.fire && workTags(io.workDone.bits).valid
+  io.streamWorkDone.bits := workTags(io.workDone.bits)
+  PoTalStream.trace("work_start", io.streamWorkStart.valid, io.streamWorkStart.bits)
+  PoTalStream.trace("work_done", io.streamWorkDone.valid, io.streamWorkDone.bits)
 
   // Non-stallable raw output; PRELOAD reserved storage in advance.
   io.rawWrite.foreach(_.ready := true.B)
@@ -216,6 +244,7 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
   writes.io.enq.bits.accRow := raw.addr
   writes.io.enq.bits.accumulate := raw.acc
   writes.io.enq.bits.workId := head.workId
+  writes.io.enq.bits.stream := head.stream
   writes.io.enq.bits.robId := head.robId
   writes.io.enq.bits.completesCommand := lastRow
 
@@ -290,6 +319,7 @@ final class PoTalWriteback[T <: Data : Arithmetic, U <: Data, V <: Data](
     commitValid.last && completedRow.completesCommand
   tracker.io.commit.valid := completedCommand
   tracker.io.commit.bits := completedRow.workId
+  PoTalStream.trace("acc_commit", commitValid.last, completedRow.stream)
 
   // Non-scaled EX commands still produce immediate ROB completions.
   private val immediate = Module(new Queue(UInt(robWidth.W), robEntries))

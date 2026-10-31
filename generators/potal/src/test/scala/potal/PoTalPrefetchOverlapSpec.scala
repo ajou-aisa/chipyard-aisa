@@ -38,6 +38,7 @@ class PoTalPrefetchOverlapHarness(latency: Int, supported: Boolean, resident: Bo
     val dBank = Input(UInt(2.W))
     val dFromAcc = Input(Bool())
     val mac = Output(Valid(Bool()))
+    val macStream = Output(new PoTalStreamTag)
     val macValue = Output(SInt(21.W))
     val writeSource = Input(UInt(2.W)) // 0 idle, 1 DMA, 2 zero-fill, 3 Execute
     val writeBank = Input(UInt(2.W))
@@ -69,6 +70,7 @@ class PoTalPrefetchOverlapHarness(latency: Int, supported: Boolean, resident: Bo
     io.dGarbage, io.dZero, io.dCols, io.dFromAcc, io.dBank)
   mesh.io.dObservation.get.bits := io.dBank(1)
   io.mac := mesh.io.qualifiedMac.get
+  io.macStream := mesh.io.qualifiedMacStream.get
   // Observe the same combinational product whose validity the monitor reports.
   io.macValue := 0.S
   BoringUtils.bore(mesh.mesh.mesh(0)(0).tile(0)(0).mac_unit.io.out_d, Seq(io.macValue))
@@ -118,6 +120,11 @@ class PoTalPrefetchOverlapTester(dut: PoTalPrefetchOverlapHarness, latency: Int,
     poke(dut.io.req.bits.tag.garbage, 0)
     poke(dut.io.req.bits.flush, 0)
     poke(dut.io.req.bits.computeUseful.get, 0)
+    poke(dut.io.req.bits.computeStream.get.valid, 0)
+    poke(dut.io.req.bits.computeStream.get.id, 0)
+    poke(dut.io.req.bits.computeStream.get.serial, 0)
+    poke(dut.io.req.bits.computeStream.get.pair, 0)
+    poke(dut.io.req.bits.computeStream.get.generation, 0)
     poke(dut.io.a.valid, 0); poke(dut.io.b.valid, 0); poke(dut.io.d.valid, 0)
     for (i <- 0 until 32) {
       poke(dut.io.a.bits(i), 5)
@@ -186,6 +193,11 @@ class PoTalPrefetchOverlapTester(dut: PoTalPrefetchOverlapHarness, latency: Int,
           aGarbage: Boolean = false, aCols: Int = 32, flush: Boolean = false,
           replaceOnLaunch: Boolean = false): Unit = {
     poke(dut.io.req.bits.computeUseful.get, if (compute) 1 else 0)
+    poke(dut.io.req.bits.computeStream.get.valid, if (compute) 1 else 0)
+    poke(dut.io.req.bits.computeStream.get.id, 6 + pair)
+    poke(dut.io.req.bits.computeStream.get.serial, 101 + pair)
+    poke(dut.io.req.bits.computeStream.get.pair, pair)
+    poke(dut.io.req.bits.computeStream.get.generation, 251 + pair)
     poke(dut.io.req.bits.pe_control.propagate, flip)
     poke(dut.io.req.bits.flush, if (flush) 1 else 0)
     poke(dut.io.req.valid, 1)
@@ -193,6 +205,9 @@ class PoTalPrefetchOverlapTester(dut: PoTalPrefetchOverlapHarness, latency: Int,
     step(1)
     poke(dut.io.req.valid, 0)
     poke(dut.io.req.bits.computeUseful.get, if (compute) 0 else 1)
+    poke(dut.io.req.bits.computeStream.get.valid, 0)
+    poke(dut.io.req.bits.computeStream.get.serial, 999)
+    poke(dut.io.req.bits.computeStream.get.pair, 1 - pair)
     if (!flush) {
       poke(dut.io.aCompute, if (compute) 1 else 0)
       poke(dut.io.aBank, pair * 2)
@@ -246,6 +261,13 @@ class PoTalPrefetchOverlapTester(dut: PoTalPrefetchOverlapHarness, latency: Int,
         poke(dut.io.req.valid, 0)
         poke(dut.io.a.valid, 0); poke(dut.io.b.valid, 0); poke(dut.io.d.valid, 0)
       }
+    }
+    if (peek(dut.io.mac.valid) == 1) {
+      expect(dut.io.macStream.valid, 1)
+      expect(dut.io.macStream.id, 6 + pair)
+      expect(dut.io.macStream.serial, 101 + pair)
+      expect(dut.io.macStream.pair, pair)
+      expect(dut.io.macStream.generation, 251 + pair)
     }
   }
 

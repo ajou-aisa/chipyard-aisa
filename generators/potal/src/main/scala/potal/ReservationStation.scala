@@ -55,6 +55,7 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
     // Unlike busy, this is true only when every reservation-station entry has been retired.
     val drained = Output(Bool())
+    val streamTerminal = Output(Vec(4, Valid(new PoTalStreamTag)))
 
     // Indexed PRELOADs waiting in the Execute reservation station.
     // Includes issued commands not yet completed.
@@ -133,6 +134,12 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
   val entries_st = Reg(Vec(reservation_station_entries_st, UDValid(new Entry)))
 
   val entries = entries_ld ++ entries_ex ++ entries_st
+  io.streamTerminal := 0.U.asTypeOf(io.streamTerminal)
+  private val streamTerminal = io.streamTerminal
+  PoTalStream.trace("rs_alloc", io.alloc.fire, io.alloc.bits.potal.stream)
+  for (terminal <- io.streamTerminal) {
+    PoTalStream.trace("rs_terminal", terminal.valid, terminal.bits)
+  }
 
   val empty_ld = !entries_ld.map(_.valid).reduce(_ || _)
   val empty_ex = !entries_ex.map(_.valid).reduce(_ || _)
@@ -466,7 +473,7 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
 
   // Issue commands which are ready to be issued
   Seq((ldq, io.issue.ld, entries_ld), (exq, io.issue.ex, entries_ex), (stq, io.issue.st, entries_st))
-    .foreach { case (q, io, entries_type) =>
+    .zipWithIndex.foreach { case ((q, io, entries_type), terminalLane) =>
 
     val issue_valids = entries_type.map(e => e.valid && e.bits.ready() && !e.bits.issued)
     val issue_sel = PriorityEncoderOH(issue_valids)
@@ -483,7 +490,11 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
     io.rob_id := global_issue_id
 
     val complete_on_issue = entries_type(issue_id).bits.complete_on_issue
+    streamTerminal(terminalLane).valid := io.fire() && complete_on_issue &&
+      issue_entry.bits.cmd.potal.stream.valid
+    streamTerminal(terminalLane).bits := issue_entry.bits.cmd.potal.stream
     val from_conv_fsm = entries_type(issue_id).bits.cmd.from_conv_fsm
+    PoTalStream.trace("rs_issue", io.fire(), io.cmd.potal.stream)
     val from_matmul_fsm = entries_type(issue_id).bits.cmd.from_matmul_fsm
 
     when (io.fire()) {
@@ -528,6 +539,12 @@ class ReservationStation[T <: Data : Arithmetic, U <: Data, V <: Data](config: G
     val type_width = log2Up(res_max_per_type)
     val queue_type = io.completed.bits(type_width + 1, type_width)
     val issue_id = io.completed.bits(type_width - 1, 0)
+    val completedEntry = Mux(queue_type === ldq, entries_ld(issue_id),
+      Mux(queue_type === exq, entries_ex(issue_id), entries_st(issue_id)))
+    io.streamTerminal(3).valid := completedEntry.bits.cmd.potal.stream.valid
+    io.streamTerminal(3).bits := completedEntry.bits.cmd.potal.stream
+    assert(!completedEntry.bits.complete_on_issue,
+      "PoTal response for complete-on-issue command")
 
     when (queue_type === ldq) {
       entries.foreach(_.bits.deps_ld(issue_id) := false.B)

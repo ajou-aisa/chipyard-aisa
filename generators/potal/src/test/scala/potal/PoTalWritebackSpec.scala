@@ -23,8 +23,11 @@ class PoTalWritebackTester(
     }
   }
   poke(dut.io.contextIssue.valid, 0)
+  poke(dut.io.contextIssue.bits.stream.valid, 0)
+  poke(dut.io.contextIssue.bits.startsWork, 0)
   poke(dut.io.scaleLoad.valid, 0)
   poke(dut.io.scaleRelease.valid, 0)
+  poke(dut.io.scaleRelease.bits.scoped, 0)
   poke(dut.io.rawCompletion.valid, 0)
   poke(dut.io.rawCompletion.bits, 0)
   poke(dut.io.robCompletion.ready, 0)
@@ -434,6 +437,87 @@ class PoTalWritebackTester(
     release(0, 1)
     release(0, 2)
 
+  } else if (scenario == 5) {
+    load(0, 0, 0)
+    load(0, 1, 0, gen=2)
+    val ctx = dut.io.contextIssue
+    poke(ctx.bits.stream.valid, 1)
+    poke(ctx.bits.stream.id, 0)
+    poke(ctx.bits.stream.serial, 1)
+    poke(ctx.bits.stream.pair, 0)
+    poke(ctx.bits.stream.generation, 1)
+    poke(ctx.bits.startsWork, 1)
+    // ACC accumulation is true even on the first work contribution.
+    issue(rob=1, work=0, block=0, first=false, last=true, cols=1)
+    raw(bank=0, a=7, b=0, accumulate=true, cols=1)
+    rawComplete(1)
+    poke(dut.io.scaleRelease.bits.scoped, 1)
+    // Unrelated generation can retire while old output is held at ACC.
+    release(0, 1, gen=2)
+    poke(dut.io.scaleRelease.bits.address, 0)
+    poke(dut.io.scaleRelease.bits.generation, 1)
+    poke(dut.io.scaleRelease.valid, 1)
+    expect(dut.io.scaleRelease.ready, 0)
+    poke(dut.io.scaleRelease.valid, 0)
+    poke(ctx.bits.stream.id, 1)
+    poke(ctx.bits.stream.serial, 2)
+    issue(rob=2, work=0, block=0, first=false, last=true,
+      cols=1, accepted=false)
+    poke(ctx.valid, 1)
+    poke(dut.io.workDone.ready, 1)
+    poke(dut.io.robCompletion.ready, 1)
+    poke(dut.io.scaledWrite(0).ready, 1)
+    var oldDone = false
+    var admitted = false
+    var cycles = 0
+    while (!admitted && cycles < 20) {
+      if (peek(dut.io.workDone.valid) == 1) {
+        expect(dut.io.streamWorkDone.bits.serial, 1)
+        oldDone = true
+      }
+      if (peek(ctx.ready) == 1) {
+        assert(oldDone, "Reused physical work before old workDone")
+        admitted = true
+      }
+      step(1)
+      cycles += 1
+    }
+    assert(admitted && oldDone)
+    poke(ctx.valid, 0)
+    raw(bank=0, a=9, b=0, accumulate=true, cols=1)
+    rawComplete(2)
+    var newDone = false
+    cycles = 0
+    while (peek(dut.io.drained) == 0 && cycles < 20) {
+      if (peek(dut.io.workDone.valid) == 1) {
+        expect(dut.io.streamWorkDone.bits.serial, 2)
+        newDone = true
+      }
+      step(1)
+      cycles += 1
+    }
+    assert(newDone)
+    expect(dut.io.drained, 1)
+    release(0, 0)
+    // Independent WB safety also refuses scoped release if an untagged
+    // legacy work is active; Controller normally excludes this mixture.
+    load(0, 0, 0)
+    poke(ctx.bits.stream.valid, 0)
+    poke(ctx.bits.startsWork, 0)
+    poke(dut.io.scaledWrite(0).ready, 0)
+    issue(rob=3, work=1, block=0, first=false, last=true, cols=1)
+    raw(bank=0, a=11, b=0, accumulate=true, cols=1)
+    rawComplete(3)
+    poke(dut.io.scaleRelease.valid, 1)
+    expect(dut.io.scaleRelease.ready, 0)
+    poke(dut.io.scaleRelease.valid, 0)
+    poke(dut.io.scaledWrite(0).ready, 1)
+    cycles = 0
+    while (peek(dut.io.drained) == 0 && cycles < 20) {
+      step(1); cycles += 1
+    }
+    expect(dut.io.drained, 1)
+    release(0, 0)
   } else {
     throw new IllegalArgumentException("unknown scenario")
   }
@@ -442,7 +526,7 @@ class PoTalWritebackTester(
 class PoTalWritebackSpec extends ChiselFlatSpec {
   behavior of "PoTalWriteback"
 
-  for (dim <- Seq(16, 32); scenario <- 0 until 5) {
+  for (dim <- Seq(16, 32); scenario <- 0 until 6) {
     it should s"preserve scale, row credit and completion DIM$dim scenario $scenario" in {
       val base = if (dim == 16) GemminiConfigs.defaultConfig else PoTalConfigs.a8w8D32Sat32
       val cfg = base.copy(

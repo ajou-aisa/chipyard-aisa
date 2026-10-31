@@ -168,10 +168,13 @@ class PoTalWritebackRMWTester(
   private var testCycle = 0
 
   poke(dut.io.contextIssue.valid, 0)
+  poke(dut.io.contextIssue.bits.stream.valid, 0)
+  poke(dut.io.contextIssue.bits.startsWork, 0)
   poke(dut.io.rawCompletion.valid, 0)
   poke(dut.io.rawCompletion.bits, 0)
   poke(dut.io.scaleLoad.valid, 0)
   poke(dut.io.scaleRelease.valid, 0)
+  poke(dut.io.scaleRelease.bits.scoped, 0)
   poke(dut.io.robCompletion.ready, 1)
   poke(dut.io.workDone.ready, 1)
   poke(dut.io.holdAccWrites, 0)

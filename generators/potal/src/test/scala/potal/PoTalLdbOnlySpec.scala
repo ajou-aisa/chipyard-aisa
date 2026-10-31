@@ -11,7 +11,7 @@ import PoTalResidentTestSupport.{parameters, command}
 
 // Scheduler tests expose real generator state and explicitly return RS credits.
 // These credits are not a DMA, SRAM, MAC, or numerical model.
-class PoTalLdbOnlyHarness(supported: Boolean = true) extends Module {
+class PoTalLdbOnlyHarness(supported: Boolean = true, tagged: Boolean = false) extends Module {
   val c = PoTalConfigs.a8w8D32Sat32
   val io = IO(new Bundle {
     val cmd = Flipped(Decoupled(new PoTalScaleCommand))
@@ -38,6 +38,17 @@ class PoTalLdbOnlyHarness(supported: Boolean = true) extends Module {
   loop.io.in.valid := io.cmd.valid
   loop.io.in.bits := 0.U.asTypeOf(loop.io.in.bits)
   command(loop.io.in.bits.cmd, io.cmd.bits)
+  if (tagged) {
+    val serial = RegInit(0.U(PoTalStream.SerialWidth.W))
+    when(io.cmd.bits.funct === POTAL_LDB_ONLY) {
+      loop.io.in.bits.potal.stream.valid := true.B
+      loop.io.in.bits.potal.stream.id := serial(PoTalStream.IdWidth - 1, 0)
+      loop.io.in.bits.potal.stream.serial := serial
+      loop.io.in.bits.potal.stream.pair := io.cmd.bits.rs1(0)
+      loop.io.in.bits.potal.stream.generation := 0.U
+      when(loop.io.in.fire) { serial := serial + 1.U }
+    }
+  }
   io.cmd.ready := loop.io.in.ready
   io.resp <> loop.io.resp
   io.generated <> loop.io.out
@@ -47,7 +58,9 @@ class PoTalLdbOnlyHarness(supported: Boolean = true) extends Module {
   loop.io.indexDescriptors := 0.U.asTypeOf(loop.io.indexDescriptors)
   loop.io.indexComplete.foreach(_ := false.B)
   io.busy := loop.io.busy
-  io.metadataZero := loop.io.out.bits.potal.asUInt === 0.U
+  val checkedMetadata = WireInit(loop.io.out.bits.potal)
+  if (tagged) { checkedMetadata.stream := 0.U.asTypeOf(new PoTalStreamTag) }
+  io.metadataZero := checkedMetadata.asUInt === 0.U
   for (i <- 0 until 2) {
     val configured = WireInit(false.B)
     val loadOnly = WireInit(false.B)
@@ -61,13 +74,15 @@ class PoTalLdbOnlyHarness(supported: Boolean = true) extends Module {
   }
 }
 
-class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean)
+class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean, tagged: Boolean = false)
     extends PeekPokeTester(dut) {
   case class Word(f: Int, a: BigInt, b: BigInt, fromLoop: Boolean,
-                  metadata: BigInt)
+                  metadata: BigInt, stream: Boolean = false)
   val words = ArrayBuffer.empty[Word]
   val pending = Array(0, 0, 0)
+  val loadKinds = scala.collection.mutable.Queue.empty[Int]
   var returnLoads = true
+  var returnBLoads = true
   var returnExecute = true
   val canonical = BigInt("200109", 16)
   poke(dut.io.cmd.valid, 0)
@@ -77,22 +92,31 @@ class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean)
   reset(2)
 
   def tick(): Unit = {
-    val credits = Array(if (returnLoads && pending(0) > 0) 1 else 0,
+    val credits = Array(if (returnLoads && pending(0) > 0 &&
+      (returnBLoads || loadKinds.front != 1)) 1 else 0,
       if (returnExecute && pending(1) > 0) 1 else 0,
       if (pending(2) > 0) 1 else 0)
     poke(dut.io.ldComplete, credits(0))
     poke(dut.io.exComplete, credits(1))
     poke(dut.io.stComplete, credits(2))
     for (i <- 0 until 3) pending(i) -= credits(i)
+    if (credits(0) == 1) loadKinds.dequeue()
     if (peek(dut.io.generated.valid) == 1 && peek(dut.io.generated.ready) == 1) {
       val g = dut.io.generated.bits
       val f = peek(g.cmd.inst.funct).toInt
       val generated = peek(g.from_matmul_fsm) == 1
+      val stream = peek(g.potal.stream.valid) == 1
+      if (tagged && generated && f == 1 && stream) {
+        expect(g.potal.stream.generation, 0)
+        val local = peek(g.cmd.rs2) & BigInt("ffffffff", 16)
+        expect(g.potal.stream.pair, if (local >= 4096) 1 else 0)
+      }
       words += Word(f, peek(g.cmd.rs1), peek(g.cmd.rs2), generated,
-        if (peek(dut.io.metadataZero) == 1) BigInt(0) else BigInt(1))
+        if (peek(dut.io.metadataZero) == 1) BigInt(0) else BigInt(1), stream)
       if (generated) {
         val kind = if (Set(1, 2, 14).contains(f)) 0 else if (f == 3) 2 else 1
         pending(kind) += 1
+        if (kind == 0) loadKinds.enqueue(f)
       }
     }
     step(1)
@@ -159,7 +183,7 @@ class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean)
         BigInt(local) | (BigInt(cols) << 32) | (BigInt(32) << 48))
     }
     assert(loads.map(w => (w.a, w.b)).toSeq == expected)
-    assert(loads.forall(w => w.f == 1 && w.metadata == 0),
+    assert(loads.forall(w => w.f == 1 && w.metadata == 0 && w.stream == tagged),
       "load-only must emit only ordinary LOAD2 without compute metadata")
   }
 
@@ -316,6 +340,38 @@ class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean)
       assert(!words.drop(headStart).exists(w => Set(2, 3, 14).contains(w.f)))
     }
 
+    // Current A must finish under shared LD pressure before the independent
+    // tagged B tail can use the now-idle A arbiter input.
+    if (tagged) {
+      for (pair <- 0 until 2) {
+        returnLoads = false
+        returnExecute = false
+        val start = words.size
+        stage(j = 1, k = 8, padJ = 0, source = 0,
+          a = BigInt("80000000", 16), aStride = 256)
+        val full = (BigInt(pair + 1) << 18) | (BigInt(pair + 1) << 16) |
+          (BigInt(1) << 20) | (BigInt(1) << 37) | (BigInt(1) << 45) |
+          (BigInt(1) << 61)
+        send(8, full)
+        until(pending(0) == 2)
+        stage(); run(1 - pair); response(0)
+        assert(words.drop(start).count(_.f == 2) == 2)
+        assert(!words.drop(start).exists(_.f == 1))
+        returnBLoads = false
+        returnLoads = true
+        until(words.drop(start).count(_.f == 2) == 4 &&
+          words.drop(start).count(_.f == 1) == 2 && pending(0) == 2)
+        assert(loadKinds.toSeq == Seq(1, 1), "current A did not finish before slow future B")
+        returnBLoads = true
+        until(words.drop(start).count(_.f == 2) == 4 &&
+          words.drop(start).count(_.f == 1) == 4)
+        assert(words.drop(start).filter(_.f == 1).forall(_.stream))
+        assert(words.drop(start).count(_.f == 6) == 1)
+        returnExecute = true
+        drain()
+      }
+    }
+
     // Active resadd cannot redirect a B-only SP request into ACC.
     poke(dut.io.generated.ready, 0)
     stage(j = 1, k = 1, padJ = 0, a = BigInt("80000000", 16),
@@ -333,9 +389,10 @@ class PoTalLdbOnlyTester(dut: PoTalLdbOnlyHarness, supported: Boolean)
 // Real RS -> LoadController -> DMA command tracker, with returned bytes
 // controlled by the test. Real PoTal writeback and ACC SRAM drain structure
 // comes from the existing harness. No physical overlap or numerical claim.
-class PoTalLdbOnlyDrainHarness extends Module {
+class PoTalLdbOnlyDrainHarness(earlyStream: Boolean = false,
+                              serialWidth: Int = PoTalStream.SerialWidth) extends Module {
   val c = PoTalConfigs.a8w8D32Sat32
-  val scheduler = Module(new PoTalLdbOnlyHarness())
+  val scheduler = Module(new PoTalStreamLdbHarness(earlyStream, serialWidth))
   val rs = Module(new ReservationStation(c, new GemminiCmd(c.reservation_station_entries)))
   val ld = Module(new LoadController(c, 40, c.local_addr_t))
   val acc = Module(new PoTalDrainHandshakeHarness(productionDim32 = true))
@@ -353,6 +410,12 @@ class PoTalLdbOnlyDrainHarness extends Module {
     val traceDrained = Output(Bool())
     val resetHead = Output(Bool())
     val counterFire = Output(Bool())
+    val pairBusy = Output(Vec(2, Bool()))
+    val epochsDrained = Output(Bool())
+    val epochReady = Output(Bool())
+    val generationBusy = Output(Bool())
+    val closed = Output(UInt(32.W))
+    val rejected = Output(UInt(32.W))
   })
   val control = io.cmd.bits.funct === POTAL_FENCE ||
     io.cmd.bits.funct === POTAL_SCALE_RELEASE || io.cmd.bits.funct === POTAL_SCALE_WRITE
@@ -375,6 +438,13 @@ class PoTalLdbOnlyDrainHarness extends Module {
   CounterEventIO.init(counters.io.event_io)
   rs.io.alloc.valid := unrolled.valid && !isCounter
   rs.io.alloc.bits := unrolled.bits
+  scheduler.streamIO.terminal := rs.io.streamTerminal
+  io.pairBusy := scheduler.streamIO.pairBusy
+  io.epochsDrained := scheduler.streamIO.drained
+  io.epochReady := scheduler.streamIO.ready
+  io.generationBusy := scheduler.streamIO.generationBusy
+  io.closed := scheduler.streamIO.closed
+  io.rejected := scheduler.streamIO.rejected
   unrolled.ready := Mux(isCounter, counters.io.in.ready, rs.io.alloc.ready)
   ld.io.cmd.valid := rs.io.issue.ld.valid
   ld.io.cmd.bits := rs.io.issue.ld.cmd
@@ -397,7 +467,7 @@ class PoTalLdbOnlyDrainHarness extends Module {
   io.dma <> ld.io.dma
   // There are no convolution, store, or execute commands in this harness.
   // RS and LD predicates are real; neither is a permanently true mock.
-  val otherDrained = !scheduler.io.busy && !scheduler.io.generated.valid &&
+  val otherDrained = scheduler.streamIO.drained && !scheduler.io.busy && !scheduler.io.generated.valid &&
     rs.io.drained && !ld.io.busy && !io.otherBusy
   acc.io.olderGemminiDrained := otherDrained && !unrolled.valid
   val traceDrained = PoTalTraceReset.drained(unrolled,
@@ -615,7 +685,8 @@ class PoTalLdbOnlyTracePathTester(dut: PoTalLdbOnlyDrainHarness)
   assert((trace(0) & 1) == 1 && trace(22) > end)
 }
 
-class PoTalLdbOnlyCounterHarness(supported: Boolean) extends Module {
+class PoTalLdbOnlyCounterHarness(supported: Boolean, streamSupported: Boolean = false,
+                               counterWidth: Int = 64) extends Module {
   val io = IO(new Bundle {
     val cmd = Flipped(Decoupled(new PoTalScaleCommand))
     val resp = Decoupled(new freechips.rocketchip.tile.RoCCResponse)
@@ -623,7 +694,7 @@ class PoTalLdbOnlyCounterHarness(supported: Boolean) extends Module {
     val externalReset = Output(Bool())
     val events = Input(new PoTalLdbOnlyEvents)
   })
-  val counters = Module(new CounterController(8, 64, false, true, supported))
+  val counters = Module(new CounterController(8, counterWidth, false, true, supported, streamSupported))
   counters.io.in.valid := io.cmd.valid
   command(counters.io.in.bits, io.cmd.bits)
   io.cmd.ready := counters.io.in.ready
@@ -750,6 +821,13 @@ class PoTalLdbOnlySpec extends ChiselFlatSpec {
     Driver.execute(Array("--backend-name", "verilator", "--target-dir",
       "/tmp/h3-8fg/rtl-run/ldb-only"), () => new PoTalLdbOnlyHarness()) {
       dut => new PoTalLdbOnlyTester(dut, true)
+    } should be(true)
+  }
+  it should "preserve tagged future B and current A progress with real scheduler budgets" in {
+    Driver.execute(Array("--backend-name", "verilator", "--target-dir",
+      "/tmp/h3-8h-rtl/tagged-ldb-scheduler"),
+      () => new PoTalLdbOnlyHarness(tagged = true)) {
+      dut => new PoTalLdbOnlyTester(dut, true, tagged = true)
     } should be(true)
   }
   it should "reject unsupported admission without forwarding funct29" in {

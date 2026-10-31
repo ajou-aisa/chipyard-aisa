@@ -144,10 +144,12 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
     // Identifies PoTal output independently of currnet mode.
     val potal = Bool()
+    val stream = new PoTalStreamTag
 
     override def make_this_garbage(dummy: Int = 0): Unit = {
       rob_id.valid := false.B
       potal := false.B
+      stream.valid := false.B
       addr.make_this_garbage()
     }
   }
@@ -296,6 +298,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     // queue. MeshWithDelays then retains each operand's tag with that operand.
     val computeUseful = cntl_valid && (cntl.perform_single_mul || cntl.perform_mul_pre)
     mesh.io.req.bits.computeUseful.get := computeUseful
+    mesh.io.req.bits.computeStream.get := cntl.computeStream.get
     mesh.io.aObservation.get.valid := PoTalOperandObservation.aUseful(
       computeUseful, cntl.a_garbage, cntl.a_unpadded_cols,
       cntl.a_read_from_acc, cntl.im2colling, cntl.a_bank)
@@ -326,6 +329,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   mesh.io.req.bits.bd_transpose := cntl.bd_transpose
   mesh.io.req.bits.tag.rob_id := cntl.rob_id
   mesh.io.req.bits.tag.potal := cntl.potal
+  mesh.io.req.bits.tag.stream := cntl.stream
   mesh.io.req.bits.flush := Mux(control_state === flush && !cntl_valid, 1.U, 0.U) // We want to make sure that the mesh has absorbed all inputs before flushing
 
   // Hazards
@@ -965,6 +969,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
     val rob_id = UDValid(UInt(log2Up(reservation_station_entries).W))
     val potal = Bool()
+    val stream = new PoTalStreamTag
+    val computeStream = if (p(PoTalPrefetchObservationEnabled)) Some(new PoTalStreamTag) else None
 
     val dataflow = UInt(1.W)
     val prop = UInt(1.W)
@@ -1025,6 +1031,10 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   mesh_cntl_signals_q.io.enq.bits.potal := !performing_single_mul &&
                                            !c_address_rs2.is_garbage() &&
                                            cmd.bits(preload_cmd_place).potal.valid
+  mesh_cntl_signals_q.io.enq.bits.stream := cmd.bits(preload_cmd_place).potal.stream
+  if (p(PoTalPrefetchObservationEnabled)) {
+    mesh_cntl_signals_q.io.enq.bits.computeStream.get := cmd.bits(a_address_place).potal.stream
+  }
 
   mesh_cntl_signals_q.io.enq.bits.dataflow := current_dataflow
   mesh_cntl_signals_q.io.enq.bits.prop := Mux(performing_single_preload, in_prop_flush, in_prop)//prop) //available propagate or not?
@@ -1184,6 +1194,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val w_row = Mux(write_to_acc, w_address.acc_row(), w_address.sp_row())
 
   val is_garbage_addr = mesh.io.resp.bits.tag.addr.is_garbage()
+  PoTalStream.trace("mesh_output", mesh.io.resp.fire && !is_garbage_addr,
+    mesh.io.resp.bits.tag.stream)
 
   val w_matrix_rows = mesh.io.resp.bits.tag.rows
   val w_matrix_cols = mesh.io.resp.bits.tag.cols

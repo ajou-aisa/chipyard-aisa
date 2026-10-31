@@ -754,6 +754,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
   
   // ADD: PoTal scale configuration for this loop.
   val potalEnabled = Bool()
+  val stream = new PoTalStreamTag
   val potalScaleBase = UInt(16.W)
   val potalScaleGeneration = UInt(8.W)  
 
@@ -804,6 +805,7 @@ class LoopMatmulState(val iterator_bitwidth: Int, val coreMaxAddrBits: Int, val 
     
     // ADD: Reset per-loop PoTal metadata.
     potalEnabled := false.B
+    stream := 0.U.asTypeOf(new PoTalStreamTag)
     potalScaleBase := 0.U
     potalScaleGeneration := 0.U
     potalPassesPerBlock := 1.U
@@ -859,6 +861,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     val busy = Output(Bool())
     val resp = Decoupled(new PoTalScaleCommandResponse)
     val ldbOnlyAdmission = Output(Valid(UInt(1.W)))
+    val streamClose = Output(Vec(2, Valid(new PoTalStreamTag)))
     val indexDescriptors = Input(Vec(PoTalProtocol.WeightBufferCount, new PoTalIndexConfig))
     val indexComplete = Input(Vec(PoTalProtocol.WeightBufferCount, Bool()))
 
@@ -912,6 +915,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
   // Create command queue
   val cmd = Queue(io.in)
+  io.streamClose := 0.U.asTypeOf(io.streamClose)
 
   val responsePending = RegInit(false.B)
   val response = Reg(new PoTalScaleCommandResponse)
@@ -1111,6 +1115,21 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   // PoTal K32 metadata generation
   // Default: forward original metadata for non-loop commands.
   io.out.bits.potal := Mux(loop_configured, 0.U.asTypeOf(new PoTalCommandMetadata), cmd.bits.potal)
+  val generatedLoopId = Mux(arb.io.chosen === 0.U, stC.io.loop_id,
+    Mux(arb.io.chosen === 1.U, ex.io.loop_id,
+      Mux(arb.io.chosen === 2.U, ldD.io.loop_id,
+        Mux(unrolled_cmd.bits.inst.funct === LOAD_CMD, ldA.io.loop_id, ldB.io.loop_id))))
+  when(loop_configured) {
+    io.out.bits.potal.stream := loops(generatedLoopId).stream
+  }
+  // Distinct static DMA load states; this does not change the LdA generator,
+  // physical addresses, arbitration, or legacy LOAD3 bias loads.
+  when(loop_configured && arb.io.chosen === 3.U &&
+      unrolled_cmd.bits.inst.funct === LOAD_CMD &&
+      loops(ldA.io.loop_id).stream.valid &&
+      loops(ldA.io.loop_id).potalPairedResidual) {
+    io.out.bits.cmd.inst.funct := LOAD3_CMD
+  }
   
   // Current loop selected by the EX generator.
   val potalExLoop = loops(ex.io.loop_id)
@@ -1149,6 +1168,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
     io.out.bits.potal.outputTileIndex := ex.io.j
     io.out.bits.potal.workId := (ex.io.loop_id * PoTalProtocol.WorkIdsPerLoop.U) + potalLocalWork
     io.out.bits.potal.firstContribution := !potalExLoop.ex_accumulate && (ex.io.k === 0.U)
+    io.out.bits.potal.startsWork := ex.io.k === 0.U
     io.out.bits.potal.lastContribution := ex.io.k === (potalExLoop.max_k - 1.U)
 
     when(io.out.fire) {
@@ -1245,7 +1265,59 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   val runStatus = Mux(!residentViewSupported.B, PoTalScaleCommandStatus.BAD_COMMAND,
     Mux(!runEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
       Mux(!runAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK)))
-  val runAccepted = !extended_run || runStatus === PoTalScaleCommandStatus.OK
+  val streamLoadValid = RegInit(VecInit(Seq.fill(3)(false.B)))
+  val streamLoadStride = Reg(Vec(3, UInt(coreMaxAddrBits.W)))
+  for (state <- 0 until 3) {
+    when(io.out.fire && io.out.bits.cmd.inst.funct === CONFIG_CMD &&
+        io.out.bits.cmd.rs1(1, 0) === CONFIG_LOAD &&
+        io.out.bits.cmd.rs1(4, 3) === state.U) {
+      streamLoadValid(state) := io.out.bits.cmd.rs1 ===
+        ((BigInt(block_size) << 16) | (BigInt(1) << 8) | (state << 3) | 1).U(64.W) &&
+        (io.out.bits.cmd.rs2 >> coreMaxAddrBits) === 0.U
+      streamLoadStride(state) := io.out.bits.cmd.rs2
+    }
+  }
+  val streamRun = is_loop_run_cmd && cmd.bits.potal.stream.valid
+  val streamPair = cmd.bits.potal.stream.pair.asUInt
+  val streamIndex = io.indexDescriptors(streamPair)
+  val streamAState = Mux(cmd.bits.cmd.rs1(62), 2.U, 0.U)
+  val streamEncoding = cmd.bits.cmd.inst.xd && !extended_run &&
+    loop_being_configured.configComplete.andR &&
+    loop_being_configured.loadOnlyConfigValid.andR &&
+    cmd.bits.cmd.rs1(20) && cmd.bits.cmd.rs1(61) &&
+    !cmd.bits.cmd.rs1(15, 2).orR &&
+    cmd.bits.cmd.rs1(19, 18) === cmd.bits.cmd.rs1(17, 16) &&
+    (cmd.bits.cmd.rs1(17, 16) === 1.U || cmd.bits.cmd.rs1(17, 16) === 2.U) &&
+    !cmd.bits.cmd.rs2(63, 32).orR && !cmd.bits.cmd.rs2(2, 0).orR &&
+    cmd.bits.cmd.rs1(60, 45) =/= 0.U &&
+    (!cmd.bits.cmd.rs1(63) || cmd.bits.cmd.rs1(62))
+  val streamAddress = maxI > 0.U && maxJ > 0.U && maxK > 0.U &&
+    streamLoadValid.asUInt.andR &&
+    streamLoadStride(streamAState) === loop_being_configured.a_dram_stride &&
+    (loop_being_configured.b_dram_addr === 0.U ||
+      streamLoadStride(1) === loop_being_configured.b_dram_stride) &&
+    loop_being_configured.pad_i < block_size.U &&
+    loop_being_configured.pad_j < block_size.U &&
+    loop_being_configured.pad_k < block_size.U &&
+    maxI * maxJ <= PoTalProtocol.WorkIdsPerLoop.U &&
+    (maxI * maxJ * block_size.U) <= (max_acc_addr / 2).U &&
+    ((cmd.bits.cmd.rs2(31, 3) +& maxI * maxK) * block_size.U) <= (max_addr / 4).U &&
+    loop_being_configured.a_dram_addr =/= 0.U &&
+    loop_being_configured.d_dram_addr === 0.U &&
+    loop_being_configured.c_dram_addr === 0.U &&
+    (!cmd.bits.cmd.rs1(63) || loop_being_configured.b_dram_addr === 0.U) &&
+    Mux(cmd.bits.cmd.rs1(63),
+      io.indexComplete(streamPair) &&
+        streamIndex.activeRows >= maxK * block_size.U - loop_being_configured.pad_k &&
+        streamIndex.jTiles >= maxJ,
+      maxK * maxJ * block_size.U <= (max_addr / 4).U) &&
+    (cmd.bits.cmd.rs1(36, 21) +&
+      (((maxK +& cmd.bits.cmd.rs1(60, 45) - 1.U) /
+        Mux(cmd.bits.cmd.rs1(60, 45) === 0.U, 1.U, cmd.bits.cmd.rs1(60, 45))) * maxJ)) <= scaleEntries.U
+  val streamStatus = Mux(!streamEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
+    Mux(!streamAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK))
+  val runAccepted = Mux(streamRun, streamStatus === PoTalScaleCommandStatus.OK,
+    !extended_run || runStatus === PoTalScaleCommandStatus.OK)
 
   // LoadController state 1 is independent of the generator's starting-address
   // stride. Only a forwarded CONFIG handshake may establish this shadow.
@@ -1316,15 +1388,26 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   val loadOnlyStatus = Mux(!ldbOnlySupported.B, PoTalScaleCommandStatus.BAD_COMMAND,
     Mux(!loadOnlyEncoding, PoTalScaleCommandStatus.INVALID_ENCODING,
       Mux(!loadOnlyAddress, PoTalScaleCommandStatus.INVALID_ADDRESS, PoTalScaleCommandStatus.OK)))
+  val streamBOnly = is_ldb_only_cmd && cmd.bits.potal.stream.valid
+  io.streamClose(1).valid := cmd.fire &&
+    ((streamRun && !runAccepted) ||
+      (streamBOnly && loadOnlyStatus =/= PoTalScaleCommandStatus.OK))
+  io.streamClose(1).bits := cmd.bits.potal.stream
+  PoTalStream.trace("scheduler_admit", cmd.fire &&
+    ((streamRun && runAccepted) ||
+      (streamBOnly && loadOnlyStatus === PoTalScaleCommandStatus.OK)),
+    cmd.bits.potal.stream)
+  PoTalStream.trace("scheduler_reject", io.streamClose(1).valid, io.streamClose(1).bits)
+  PoTalStream.trace("generated", io.out.fire, io.out.bits.potal.stream)
   io.ldbOnlyAdmission.valid := cmd.fire && is_ldb_only_cmd &&
     loadOnlyStatus === PoTalScaleCommandStatus.OK
   io.ldbOnlyAdmission.bits := loadOnlyPair
 
-  when(cmd.fire && (is_resident_config_cmd || extended_run || is_ldb_only_cmd) && cmd.bits.cmd.inst.xd) {
+  when(cmd.fire && (is_resident_config_cmd || extended_run || is_ldb_only_cmd || streamRun) && cmd.bits.cmd.inst.xd) {
     responsePending := true.B
     response.rd := cmd.bits.cmd.inst.rd
-    response.status := Mux(is_ldb_only_cmd, loadOnlyStatus,
-      Mux(is_resident_config_cmd, viewStatus, runStatus))
+    response.status := Mux(streamRun, streamStatus, Mux(is_ldb_only_cmd, loadOnlyStatus,
+      Mux(is_resident_config_cmd, viewStatus, runStatus)))
   }
 
   // Ordered TLB FLUSH invalidates only staged transactions. It is not a drain
@@ -1410,6 +1493,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
       // Reset all compute/resident/index metadata without changing staged B
       // dimensions/source. Only LdB starts a real generator for this slot.
       loop_being_configured.reset()
+      loop_being_configured.stream := cmd.bits.potal.stream
       loop_being_configured.loadOnly := true.B
       loop_being_configured.configured := true.B
       loop_being_configured.a_ex_spad_id := loadOnlySelector
@@ -1464,6 +1548,7 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
 
       is (LOOP_WS) {
         when(runAccepted) {
+          loop_being_configured.stream := cmd.bits.potal.stream
           loop_being_configured.loadOnly := false.B
           loop_being_configured.residentActive := extended_run
           loop_being_configured.ex_accumulate := cmd.bits.cmd.rs1(0)
@@ -1780,6 +1865,8 @@ class LoopMatmul(block_size: Int, coreMaxAddrBits: Int, reservation_station_size
   }
 
   when (head_loop.running && head_loop.all_completed()) {
+    io.streamClose(0).valid := head_loop.stream.valid
+    io.streamClose(0).bits := head_loop.stream
     head_loop.reset()
     head_loop_id := ~head_loop_id
   }
@@ -1803,7 +1890,7 @@ object LoopMatmul {
             compute_rs1_t: ComputeRs, compute_rs2_t: ComputeRs, mvout_rs2_t: MvoutRs2, scaleEntries: Int,
             residentViewSupported: Boolean, indexDescriptors: Vec[PoTalIndexConfig], indexComplete: Vec[Bool],
             ldbOnlySupported: Boolean = false)
-           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool], DecoupledIO[PoTalScaleCommandResponse], ValidIO[UInt]) = {
+           (implicit p: Parameters): (DecoupledIO[GemminiCmd], Bool, Vec[Bool], Vec[Bool], DecoupledIO[PoTalScaleCommandResponse], ValidIO[UInt], Vec[ValidIO[PoTalStreamTag]]) = {
     val mod = Module(new LoopMatmul(block_size, coreMaxAddrBits, rob_size, max_lds, max_exs, max_sts,
       max_addr, max_acc_addr, input_w, acc_w, dma_max_bytes,
       mvin_rs2_t, preload_rs1_t, preload_rs2_t, compute_rs1_t, compute_rs2_t, mvout_rs2_t, scaleEntries,
@@ -1820,7 +1907,8 @@ object LoopMatmul {
       mod.io.indexedLoopActive,
       mod.io.indexedLoopConfigured,
       mod.io.resp,
-      mod.io.ldbOnlyAdmission
+      mod.io.ldbOnlyAdmission,
+      mod.io.streamClose
     )
   }
 

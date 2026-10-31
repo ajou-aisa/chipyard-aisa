@@ -48,6 +48,7 @@ object GemminiISA {
 
   // H3-8G: acknowledged scheduler admission, not DMA completion.
   val POTAL_LDB_ONLY = 29.U
+  val POTAL_STREAM = 30.U
 
   // rs1[2:0] values
   val CONFIG_EX = 0.U

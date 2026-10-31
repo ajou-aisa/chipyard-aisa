@@ -70,7 +70,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   require(!p(PoTalEarlyPrefetchEnabled) || ldbOnlySupported,
     "PoTal early prefetch requires the supported DIM32 observation geometry")
   val counters = Module(new CounterController(outer.config.num_counter, outer.xLen,
-    residentViewSupported, prefetchObservationSupported, ldbOnlySupported))
+    residentViewSupported, prefetchObservationSupported, ldbOnlySupported, ldbOnlySupported))
   counters.io.event_io.external_values(0) := 0.U
   counters.io.event_io.event_signal(0) := false.B
   counters.io.in.valid := false.B
@@ -243,22 +243,78 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   // ============================================================
 
   val rawFunct = raw_cmd.bits.cmd.inst.funct
+  val streamMode = Module(new PoTalStreamMode(ldbOnlySupported && outer.xLen == 64))
+  val streamActive = streamMode.io.active
+  val streamContinuous = streamMode.io.continuous
+  streamMode.io.op := raw_cmd.bits.cmd.rs1(3, 0)
+  streamMode.io.funct := rawFunct
+  streamMode.io.rs1 := raw_cmd.bits.cmd.rs1
+  streamMode.io.commit := false.B
+  val streamStarted = RegInit(false.B)
+  val streamDrained = WireDefault(false.B)
+  val streamResponsePending = RegInit(false.B)
+  val streamResponse = Reg(new PoTalScaleCommandResponse)
+  val epochs = Module(new PoTalStreamEpochTable(reservation_station_entries + 4))
+  epochs.io.continuous := streamContinuous
+  epochs.io.generated.valid := false.B
+  epochs.io.generated.bits := 0.U.asTypeOf(new PoTalStreamTag)
+  epochs.io.close := 0.U.asTypeOf(epochs.io.close)
+  epochs.io.terminal := reservation_station.io.streamTerminal
+  epochs.io.workStart := 0.U.asTypeOf(epochs.io.workStart)
+  epochs.io.workDone := 0.U.asTypeOf(epochs.io.workDone)
+  potalWritebackOpt.foreach { wb =>
+    epochs.io.workStart := wb.io.streamWorkStart
+    epochs.io.workDone := wb.io.streamWorkDone
+  }
+  val isStreamControl = rawFunct === POTAL_STREAM
+  // Stream sources are immutable until scoped retirement. Direct DMA, load
+  // reconfiguration, convolution and legacy extensions are not stream ops.
+  val forbiddenStreamCommand = streamActive && !(isStreamControl ||
+    rawFunct === LOOP_WS ||
+    streamMode.io.bOnly ||
+    (rawFunct >= LOOP_WS_CONFIG_BOUNDS && rawFunct <= LOOP_WS_CONFIG_STRIDES_DC) ||
+    rawFunct === POTAL_SCALE_WRITE || rawFunct === POTAL_SCALE_RELEASE ||
+    rawFunct === POTAL_FENCE || rawFunct === POTAL_INDEX_CONFIG ||
+    rawFunct === POTAL_INDEX_WRITE || rawFunct === COUNTER_OP ||
+    (rawFunct === CONFIG_CMD && epochs.io.drained &&
+      (!streamStarted || raw_cmd.bits.cmd.rs1(1, 0) === CONFIG_STORE)) ||
+    (rawFunct === STORE_CMD && epochs.io.drained))
+  val streamOp = raw_cmd.bits.cmd.rs1(3, 0)
+  val streamPair = raw_cmd.bits.cmd.rs1(4)
+  val streamEncoding = raw_cmd.bits.cmd.inst.xd &&
+    Mux(streamOp === 4.U, !raw_cmd.bits.cmd.rs1(63, 5).orR,
+      !raw_cmd.bits.cmd.rs1(63, 4).orR) &&
+    Mux(streamOp === 5.U, !raw_cmd.bits.cmd.rs2(63, 21).orR,
+      raw_cmd.bits.cmd.rs2 === 0.U)
+  val streamLegal = streamEncoding && streamMode.io.legal
+  val scopedRelease = isStreamControl && streamLegal && streamOp === 5.U
+  epochs.io.generation := raw_cmd.bits.cmd.rs2(15, 8)
+  val streamControlReady = !streamResponsePending &&
+    (forbiddenStreamCommand || !streamLegal || Mux(streamOp === 4.U, !epochs.io.pairBusy(streamPair),
+      streamDrained))
+  val streamRun = streamMode.io.producer
+  val streamRunReady = !streamRun || epochs.io.allocate.ready
+  epochs.io.allocate.valid := false.B
+  epochs.io.allocate.bits.pair := streamMode.io.pair
+  epochs.io.allocate.bits.generation := streamMode.io.generation
 
   val isPoTalControl =
     rawFunct === POTAL_SCALE_WRITE ||
     rawFunct === POTAL_SCALE_RELEASE ||
     rawFunct === POTAL_FENCE ||
     rawFunct === POTAL_INDEX_WRITE ||
-    rawFunct === POTAL_INDEX_CONFIG
+    rawFunct === POTAL_INDEX_CONFIG || scopedRelease
 
   val gemminiRawCmd = Wire(Decoupled(new GemminiCmd(reservation_station_entries)))
 
   gemminiRawCmd.bits := raw_cmd.bits
+  when(streamRun) { gemminiRawCmd.bits.potal.stream := epochs.io.allocated }
 
   // Preserve the original command path for non-PoTal
   // configurations.
     if (enablePoTalSat32Acc) {
-      gemminiRawCmd.valid := raw_cmd.valid && !isPoTalControl
+      gemminiRawCmd.valid := raw_cmd.valid && !isPoTalControl &&
+        !isStreamControl && !forbiddenStreamCommand && streamRunReady
     } else {
       gemminiRawCmd.valid := raw_cmd.valid
     }
@@ -273,16 +329,40 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       ingress.io.cmd.bits.rs2 := raw_cmd.bits.cmd.rs2
       ingress.io.cmd.bits.rd := raw_cmd.bits.cmd.inst.rd
       ingress.io.cmd.bits.xd := raw_cmd.bits.cmd.inst.xd
+      when(scopedRelease) {
+        ingress.io.cmd.bits.funct := POTAL_SCALE_RELEASE
+        ingress.io.cmd.bits.rs1 := raw_cmd.bits.cmd.rs2
+        ingress.io.cmd.bits.rs2 := 0.U
+      }
 
       // One FIFO head is routed to exactly one consumer.
       raw_cmd.ready := Mux(
         isPoTalControl,
         ingress.io.cmd.ready,
-        gemminiRawCmd.ready
+        Mux(isStreamControl || forbiddenStreamCommand, streamControlReady,
+          gemminiRawCmd.ready && streamRunReady)
       )
 
     case None =>
       raw_cmd.ready := gemminiRawCmd.ready
+  }
+  epochs.io.allocate.valid := gemminiRawCmd.fire && streamRun
+  when(epochs.io.allocate.fire) { streamStarted := true.B }
+  when(enablePoTalSat32Acc.B && raw_cmd.fire &&
+      (isStreamControl || forbiddenStreamCommand) && !scopedRelease) {
+    when(raw_cmd.bits.cmd.inst.xd) {
+      streamResponsePending := true.B
+      streamResponse.rd := raw_cmd.bits.cmd.inst.rd
+      streamResponse.status := Mux(forbiddenStreamCommand, PoTalScaleCommandStatus.BAD_COMMAND, Mux(!streamEncoding,
+        PoTalScaleCommandStatus.INVALID_ENCODING,
+        Mux(!streamLegal, PoTalScaleCommandStatus.BAD_COMMAND, PoTalScaleCommandStatus.OK)))
+    }
+    when(streamLegal && !forbiddenStreamCommand) {
+      streamMode.io.commit := true.B
+      when(streamOp === 1.U || streamOp === 2.U || streamOp === 6.U) {
+        streamStarted := false.B
+      }
+    }
   }
 
 
@@ -309,13 +389,16 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     residentIndexComplete := ingress.io.indexComplete
   }
 
-  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured, loop_response, ldbOnlyAdmission) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
+  val (loop_cmd, loop_matmul_unroller_busy, indexedLoopActive, indexedLoopConfigured, loop_response, ldbOnlyAdmission, streamClose) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
     meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t), potalScaleEntries,
      residentViewSupported, residentIndexDescriptors, residentIndexComplete, ldbOnlySupported) }
+  epochs.io.close := streamClose
+  epochs.io.generated.valid := loop_cmd.fire && loop_cmd.bits.potal.stream.valid
+  epochs.io.generated.bits := loop_cmd.bits.potal.stream
   counters.io.earlyEvents.foreach { events =>
     events := 0.U.asTypeOf(events)
     events.admission := ldbOnlyAdmission
@@ -837,7 +920,10 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       val allDrained =
         olderGemminiDrained && wb.io.drained
 
-      ingress.io.releaseSafe := allDrained
+      streamDrained := allDrained && epochs.io.drained
+      ingress.io.releaseSafe := Mux(scopedRelease,
+        !epochs.io.generationBusy, allDrained)
+      wb.io.scaleRelease.bits.scoped := scopedRelease
       ingress.io.fenceDrained := allDrained
       // COUNTER reaches this queue, unlike the intercepted Fence/Release.
       // Exclude only canonical TraceReset's own head, never older work.
@@ -959,6 +1045,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     loop_cmd.valid ||
     conv_cmd.valid ||
     potalResponsePending ||
+    streamResponsePending || !epochs.io.drained ||
     io.resp.valid
 
  
@@ -975,7 +1062,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     case Some(ingress) =>
 
       val responseArb =
-        Module(new RRArbiter(new RoCCResponse, 3))
+        Module(new RRArbiter(new RoCCResponse, 4))
 
       responseArb.io.in(0) <> counters.io.out
 
@@ -995,6 +1082,10 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       responseArb.io.in(2).bits.rd := loop_response.bits.rd
       responseArb.io.in(2).bits.data := loop_response.bits.status
       loop_response.ready := responseArb.io.in(2).ready
+      responseArb.io.in(3).valid := streamResponsePending
+      responseArb.io.in(3).bits.rd := streamResponse.rd
+      responseArb.io.in(3).bits.data := streamResponse.status
+      when(responseArb.io.in(3).fire) { streamResponsePending := false.B }
 
       arbitratedResponse <> responseArb.io.out
 

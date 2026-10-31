@@ -18,6 +18,7 @@ import midas.targetutils.PerfCounter
 import midas.targetutils.SynthesizePrintf
 
 class StreamReadRequest[U <: Data](spad_rows: Int, acc_rows: Int, mvin_scale_t_bits: Int)(implicit p: Parameters) extends CoreBundle {
+  val stream = new PoTalStreamTag
   val vaddr = UInt(coreMaxAddrBits.W)
   val spaddr = UInt(log2Up(spad_rows max acc_rows).W) // TODO use LocalAddr in DMA
   val is_acc = Bool()
@@ -35,6 +36,7 @@ class StreamReadRequest[U <: Data](spad_rows: Int, acc_rows: Int, mvin_scale_t_b
 
 class StreamReadResponse[U <: Data](spadWidth: Int, accWidth: Int, spad_rows: Int, acc_rows: Int, aligned_to: Int, mvin_scale_t_bits: Int)
                         (implicit p: Parameters) extends CoreBundle {
+  val stream = new PoTalStreamTag
   val data = UInt((spadWidth max accWidth).W)
   val addr = UInt(log2Up(spad_rows max acc_rows).W)
   val mask = Vec((spadWidth max accWidth) / (aligned_to * 8) max 1, Bool())
@@ -105,6 +107,7 @@ class StreamReader[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T
     io.resp.bits.pixel_repeats := RegEnable(xactTracker.io.peek.entry.pixel_repeats, beatPacker.io.req.fire)
     io.resp.bits.len := RegEnable(xactTracker.io.peek.entry.len, beatPacker.io.req.fire)
     io.resp.bits.cmd_id := RegEnable(xactTracker.io.peek.entry.cmd_id, beatPacker.io.req.fire)
+    io.resp.bits.stream := RegEnable(xactTracker.io.peek.entry.stream, beatPacker.io.req.fire)
     io.resp.bits.bytes_read := RegEnable(xactTracker.io.peek.entry.bytes_to_read, beatPacker.io.req.fire)
     io.resp.bits.last := beatPacker.io.out.bits.last
 
@@ -262,6 +265,7 @@ class StreamReaderCore[T <: Data, U <: Data, V <: Data](config: GemminiArrayConf
     io.reserve.entry.lg_len_req := DontCare // TODO just remove this from the IO completely
     io.reserve.entry.bytes_to_read := read_bytes_read
     io.reserve.entry.cmd_id := req.cmd_id
+    io.reserve.entry.stream := req.stream
 
     io.reserve.entry.addr := req.spaddr + req.block_stride *
       Mux(req.has_acc_bitwidth,

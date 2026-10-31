@@ -8,6 +8,7 @@ import midas.targetutils.SynthesizePrintf
 class XactTrackerEntry[U <: Data](maxShift: Int, spadWidth: Int, accWidth: Int,
                                   spadRows: Int, accRows: Int, maxReqBytes: Int, mvin_scale_t_bits: Int,
                                   nCmds: Int) extends Bundle {
+  val stream = new PoTalStreamTag
   val shift = UInt(log2Up(maxShift).W)
   val addr = UInt(log2Up(spadRows max accRows).W)
   val is_acc = Bool()

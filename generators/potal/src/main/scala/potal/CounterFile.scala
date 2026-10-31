@@ -268,7 +268,8 @@ object PoTalTraceReset {
 class CounterController(nPerfCounter: Int, counterWidth: Int,
                         residentViewSupported: Boolean = false,
                         prefetchObservationSupported: Boolean = false,
-                        ldbOnlySupported: Boolean = false)(implicit p: Parameters) extends Module {
+                        ldbOnlySupported: Boolean = false,
+                        streamSupported: Boolean = false)(implicit p: Parameters) extends Module {
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new RoCCCommand))
     val out = Decoupled(new RoCCResponse)
@@ -284,6 +285,12 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
 
     val out_reg = Reg(io.out.bits.cloneType)
     val out_valid_reg = RegInit(false.B)
+    val streamCapabilityRead = (streamSupported && counterWidth == 64).B &&
+      io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
+      io.in.bits.rs1 === PoTalStream.Query.U(64.W) && io.in.bits.rs2 === 0.U
+    val earlyStreamCapabilityRead = (streamSupported && ldbOnlySupported && counterWidth == 64).B &&
+      io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
+      io.in.bits.rs1 === PoTalStream.EarlyQuery.U(64.W) && io.in.bits.rs2 === 0.U
     val residentCapabilityRead = (residentViewSupported && counterWidth == 64).B &&
       io.in.bits.inst.funct === COUNTER_OP && io.in.bits.inst.xd &&
       io.in.bits.rs1 === PoTalResidentCapability.Query.U(64.W) &&
@@ -371,7 +378,7 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
       values(26) := first(9); values(27) := last(9)
       traceData := Mux(traceReset, events.drained.asUInt, values(io.in.bits.rs1(4, 0)))
     }
-    val capabilityRead = residentCapabilityRead || observationCapabilityRead || ldbOnlyCapabilityRead ||
+    val capabilityRead = earlyStreamCapabilityRead || streamCapabilityRead || residentCapabilityRead || observationCapabilityRead || ldbOnlyCapabilityRead ||
       traceReset || traceRead
 
     // Decode access option (assume 8 counters)
@@ -399,10 +406,11 @@ class CounterController(nPerfCounter: Int, counterWidth: Int,
       out_valid_reg := true.B
       out_reg.rd := io.in.bits.inst.rd
       out_reg.data := 0.U
-      out_reg.data := Mux(traceReset || traceRead, traceData,
+      out_reg.data := Mux(earlyStreamCapabilityRead, PoTalStream.EarlySignature.U(64.W),
+        Mux(streamCapabilityRead, PoTalStream.Signature.U(64.W), Mux(traceReset || traceRead, traceData,
         Mux(ldbOnlyCapabilityRead, PoTalLdbOnlyCapability.Signature.U(64.W),
         Mux(observationCapabilityRead, PoTalPrefetchCapability.Signature.U(64.W),
-          Mux(residentCapabilityRead, PoTalResidentCapability.Signature.U(64.W), counterfile.io.data))))
+          Mux(residentCapabilityRead, PoTalResidentCapability.Signature.U(64.W), counterfile.io.data))))))
     }
 
     io.out.valid := out_valid_reg

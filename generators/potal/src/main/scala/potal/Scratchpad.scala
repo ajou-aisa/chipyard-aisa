@@ -12,6 +12,7 @@ import freechips.rocketchip.tilelink._
 import Util._
 
 class ScratchpadMemReadRequest[U <: Data](local_addr_t: LocalAddr, scale_t_bits: Int)(implicit p: Parameters) extends CoreBundle {
+  val stream = new PoTalStreamTag
   val vaddr = UInt(coreMaxAddrBits.W)
   val laddr = local_addr_t.cloneType
 
@@ -57,6 +58,7 @@ class ScratchpadMemWriteResponse extends Bundle {
 }
 
 class ScratchpadMemReadResponse extends Bundle {
+  val stream = new PoTalStreamTag
   val bytesRead = UInt(16.W) // TODO magic number here
   val cmd_id = UInt(8.W) // TODO don't use a magic number here
 }
@@ -363,6 +365,9 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
     reader.module.io.req.bits.block_stride := read_issue_q.io.deq.bits.block_stride
     reader.module.io.req.bits.status := read_issue_q.io.deq.bits.status
     reader.module.io.req.bits.cmd_id := read_issue_q.io.deq.bits.cmd_id
+    reader.module.io.req.bits.stream := read_issue_q.io.deq.bits.stream
+    PoTalStream.trace("dma_request", reader.module.io.req.fire,
+      reader.module.io.req.bits.stream)
 
     val (mvin_scale_in, mvin_scale_out) = VectorScalarMultiplier(
       config.mvin_scale_args,
@@ -432,6 +437,9 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
       // mvin_scale_finished -> mvin_scale_out.bits.tag.cmd_id,
       mvin_scale_finished -> mvin_scale_pixel_repeater.io.resp.bits.tag.cmd_id,
       mvin_scale_acc_finished -> mvin_scale_acc_out.bits.tag.cmd_id))
+    io.dma.read.resp.bits.stream := MuxCase(zero_writer_pixel_repeater.io.resp.bits.tag.stream, Seq(
+      mvin_scale_finished -> mvin_scale_pixel_repeater.io.resp.bits.tag.stream,
+      mvin_scale_acc_finished -> mvin_scale_acc_out.bits.tag.stream))
 
     io.dma.read.resp.bits.bytesRead := MuxCase(zero_writer_bytes_read, Seq(
       // mvin_scale_finished -> mvin_scale_out.bits.tag.bytes_read,
@@ -535,6 +543,9 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
         // DMA data wins the physical SRAM write-port selection.
         // Exclude zero-fill operations and ExecuteController writes.
         io.dmaSpadWrite(i) := dmaread && !exwrite
+        PoTalStream.trace(if (i % 2 == 0) "a_sram_write" else "b_sram_write",
+          dmaread && !exwrite && bio.write.mask.asUInt.orR,
+          mvin_scale_pixel_repeater.io.resp.bits.tag.stream)
 
         bio.write.en := exwrite || dmaread || zerowrite
 

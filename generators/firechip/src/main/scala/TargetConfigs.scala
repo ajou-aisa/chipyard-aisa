@@ -361,6 +361,12 @@ class FireSimQuadRocketSinglePoTalD32EarlyPrefetchObservationConfig extends Conf
   new FireSimQuadRocketSinglePoTalD32PrefetchObservationConfig
 )
 
+// Separate artifact namespace; preserve the exact Early image geometry and
+// legacy routes. Streaming remains inactive until its checked BEGIN command.
+class FireSimQuadRocketSinglePoTalD32PairedStreamingConfig extends Config(
+  new FireSimQuadRocketSinglePoTalD32EarlyPrefetchObservationConfig
+)
+
 //**********************************************************************************
 // Supernode Configurations, base off chipyard's RocketConfig
 //**********************************************************************************

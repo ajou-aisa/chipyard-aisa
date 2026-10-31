@@ -41,6 +41,8 @@ object PoTalProtocol {
 
 class PoTalCommandMetadata extends Bundle {
   val valid = Bool()
+  val stream = new PoTalStreamTag
+  val startsWork = Bool()
 
   // Scale block index within the active scale window.
   // One block contains passesPerBlock array K tiles.
