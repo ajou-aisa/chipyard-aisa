@@ -171,7 +171,9 @@ class ScratchpadBank(n: Int, w: Int, aligned_to: Int, single_ported: Boolean, us
 }
 
 
-class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, U, V])
+class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, U, V],
+    metadataDeadline: Int = 65536, metadataOwnerWidth: Int = 8,
+    metadataGenerationWidth: Int = 32)
     (implicit p: Parameters, ev: Arithmetic[T]) extends LazyModule {
 
   import config._
@@ -201,6 +203,14 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
 
   xbar_node := TLBuffer() := reader.node // TODO
   xbar_node := TLBuffer() := writer.node
+  val metadata = if (p(PoTalIndexMetadataTransportKey)) {
+    val transport = LazyModule(new PoTalIndexMetadataTransport(
+      potalIndexEntries, DIM, potalIndexEntries, potalSpRows, tlb_size, dma_maxbytes,
+      ownerWidth = metadataOwnerWidth, generationWidth = metadataGenerationWidth,
+      deadline = metadataDeadline))
+    xbar_node := TLBuffer() := transport.node
+    Some(transport)
+  } else None
   id_node := TLWidthWidget(config.dma_buswidth/8) := TLBuffer() := xbar_node
 
   lazy val module = new Impl
@@ -240,6 +250,9 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
 
       // TLB ports
       val tlb = Vec(2, new FrontendTLBIO)
+      val metadataControl = metadata.map(_ => new PoTalIndexMetadataControl(
+        2, potalIndexEntries, metadataOwnerWidth, 8, metadataGenerationWidth))
+      val metadataTLB = metadata.map(_ => new TLBPTWIO)
 
       // Misc. ports
       // Actual DRAM-to-SPAD writes, indexed by physical SPAD bank.
@@ -448,11 +461,21 @@ class Scratchpad[T <: Data, U <: Data, V <: Data](config: GemminiArrayConfig[T, 
 
     io.tlb(0) <> writer.module.io.tlb
     io.tlb(1) <> reader.module.io.tlb
+    metadata.foreach { transport =>
+      transport.module.io.control <> io.metadataControl.get
+      transport.module.io.ptw <> io.metadataTLB.get
+    }
 
     writer.module.io.flush := io.flush
     reader.module.io.flush := io.flush
 
     io.busy := writer.module.io.busy || reader.module.io.busy || write_issue_q.io.deq.valid || write_norm_q.io.deq.valid || write_scale_q.io.deq.valid || write_dispatch_q.valid
+    metadata.foreach { _ =>
+      io.busy := writer.module.io.busy || reader.module.io.busy ||
+        write_issue_q.io.deq.valid || write_norm_q.io.deq.valid ||
+        write_scale_q.io.deq.valid || write_dispatch_q.valid ||
+        io.metadataControl.get.metadataFenceBusy
+    }
 
     val spad_mems = {
       val banks = Seq.fill(sp_banks) { Module(new ScratchpadBank(

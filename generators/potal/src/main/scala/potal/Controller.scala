@@ -29,7 +29,8 @@ class Gemmini[T <: Data : Arithmetic, U <: Data, V <: Data](val config: GemminiA
                                      (implicit p: Parameters)
   extends LazyRoCC (
     opcodes = config.opcodes,
-    nPTWPorts = if (config.use_shared_tlb) 1 else 2) {
+    nPTWPorts = (if (config.use_shared_tlb) 1 else 2) +
+      (if (p(PoTalIndexMetadataTransportKey)) 1 else 0)) {
 
   Files.write(Paths.get(config.headerFilePath), config.generateHeader().getBytes(StandardCharsets.UTF_8))
   if (System.getenv("GEMMINI_ONLY_GENERATE_GEMMINI_H") == "1") {
@@ -88,7 +89,20 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   tlb.io.exp.foreach(_.flush_skip := false.B)
   tlb.io.exp.foreach(_.flush_retry := false.B)
 
-  io.ptw <> tlb.io.ptw
+  if (p(PoTalIndexMetadataTransportKey)) {
+    require(io.ptw.size == tlb.io.ptw.size + 1)
+    for (i <- 0 until tlb.io.ptw.size) { io.ptw(i) <> tlb.io.ptw(i) }
+    io.ptw(tlb.io.ptw.size) <> spad.module.io.metadataTLB.get
+    val metadata = spad.module.io.metadataControl.get
+    metadata.submit.valid := false.B
+    metadata.submit.bits := 0.U.asTypeOf(metadata.submit.bits)
+    metadata.result.ready := true.B
+    metadata.mappingEpoch := 0.U
+    metadata.flush := tlb.io.exp.map(_.flush()).reduce(_ || _)
+    metadata.passLoad := true.B
+  } else {
+    io.ptw <> tlb.io.ptw
+  }
 
   counters.io.event_io.collect(tlb.io.counter)
 
@@ -237,6 +251,14 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
 
   val raw_cmd = raw_cmd_q.io.deq
 
+  val indexRegisterOpt = if (p(PoTalIndexRegisterControllerKey)) {
+    require(outer.xLen == 64 && enablePoTalSat32Acc && DIM == 32 &&
+      inputType.getWidth == 8 &&
+      potalIndexEntries == 64 && sp_banks == 4 && potalSpRows == 8192 && !clock_gate,
+      "Register Controller requires RV64 A8W8 DIM32 Index64, four banks and ungated clock")
+    Some(Module(new PoTalIndexControllerIntegration(DIM, potalSpRows)))
+  } else None
+
 
   // ============================================================
   // Dispatch PoTal control commands before LoopConv/LoopMatmul
@@ -269,7 +291,8 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   val isStreamControl = rawFunct === POTAL_STREAM
   // Stream sources are immutable until scoped retirement. Direct DMA, load
   // reconfiguration, convolution and legacy extensions are not stream ops.
-  val forbiddenStreamCommand = streamActive && !(isStreamControl ||
+  val forbiddenStreamCommand = (if (p(PoTalIndexRegisterControllerKey))
+    streamActive && !(rawFunct >= 32.U && rawFunct <= 37.U) else streamActive) && !(isStreamControl ||
     rawFunct === LOOP_WS ||
     streamMode.io.bOnly ||
     (rawFunct >= LOOP_WS_CONFIG_BOUNDS && rawFunct <= LOOP_WS_CONFIG_STRIDES_DC) ||
@@ -322,6 +345,31 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   potalIngressOpt match {
     case Some(ingress) =>
 
+      if (p(PoTalIndexRegisterControllerKey)) {
+        val h = indexRegisterOpt.get
+        val experimental = rawFunct >= 32.U && rawFunct <= 37.U
+        h.io.cmd.valid := raw_cmd.valid && experimental && !h.io.rawHold
+        h.io.cmd.bits := raw_cmd.bits.cmd
+        h.io.cpuCmd.valid := raw_cmd.valid && isPoTalControl
+        h.io.cpuCmd.bits.funct := rawFunct
+        h.io.cpuCmd.bits.rs1 := raw_cmd.bits.cmd.rs1
+        h.io.cpuCmd.bits.rs2 := raw_cmd.bits.cmd.rs2
+        h.io.cpuCmd.bits.rd := raw_cmd.bits.cmd.inst.rd
+        h.io.cpuCmd.bits.xd := raw_cmd.bits.cmd.inst.xd
+        when(scopedRelease) {
+          h.io.cpuCmd.bits.funct := POTAL_SCALE_RELEASE
+          h.io.cpuCmd.bits.rs1 := raw_cmd.bits.cmd.rs2
+          h.io.cpuCmd.bits.rs2 := 0.U
+        }
+        ingress.io.cmd <> h.io.ingressCmd
+        h.io.ingressResp <> ingress.io.resp
+        gemminiRawCmd.valid := raw_cmd.valid && !experimental && !h.io.legacyHold &&
+          !isPoTalControl && !isStreamControl && !forbiddenStreamCommand && streamRunReady
+        raw_cmd.ready := Mux(experimental, h.io.cmd.ready && !h.io.rawHold,
+          Mux(isPoTalControl, h.io.cpuCmd.ready,
+            !h.io.legacyHold && Mux(isStreamControl || forbiddenStreamCommand, streamControlReady,
+              gemminiRawCmd.ready && streamRunReady)))
+      } else {
       ingress.io.cmd.valid := raw_cmd.valid && isPoTalControl
 
       ingress.io.cmd.bits.funct := rawFunct
@@ -342,6 +390,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
         Mux(isStreamControl || forbiddenStreamCommand, streamControlReady,
           gemminiRawCmd.ready && streamRunReady)
       )
+      }
 
     case None =>
       raw_cmd.ready := gemminiRawCmd.ready
@@ -517,6 +566,11 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
 
   // Retain the preliminary state for RTL inspection.
   dontTouch(indexBufferBusy)
+  indexRegisterOpt.foreach { h =>
+    for (buffer <- 0 until PoTalProtocol.WeightBufferCount) {
+      h.io.indexUpdateSafe(buffer) := !indexBufferBusy(buffer)
+    }
+  }
   counters.io.event_io.connectEventSignal(CounterEvent.LOOP_MATMUL_ACTIVE_CYCLES, loop_matmul_unroller_busy)
 
   // Wire up controllers to ROB
@@ -923,8 +977,18 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       streamDrained := allDrained && epochs.io.drained
       ingress.io.releaseSafe := Mux(scopedRelease,
         !epochs.io.generationBusy, allDrained)
+      if (p(PoTalIndexMetadataTransportKey)) {
+        ingress.io.releaseSafe := Mux(scopedRelease,
+          !epochs.io.generationBusy, allDrained) &&
+          !spad.module.io.metadataControl.get.metadataCloseBlocked
+      }
       wb.io.scaleRelease.bits.scoped := scopedRelease
       ingress.io.fenceDrained := allDrained
+      indexRegisterOpt.foreach { h =>
+        h.io.olderDrained := allDrained && epochs.io.drained
+        ingress.io.fenceDrained := allDrained &&
+          Mux(h.io.guardSelected, h.io.guardDrain, !h.io.legacyHold)
+      }
       // COUNTER reaches this queue, unlike the intercepted Fence/Release.
       // Exclude only canonical TraceReset's own head, never older work.
       earlyTraceDrained := PoTalTraceReset.drained(unrolled_cmd,
@@ -1048,6 +1112,14 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     streamResponsePending || !epochs.io.drained ||
     io.resp.valid
 
+  indexRegisterOpt.foreach { h =>
+    io.busy := raw_cmd.valid || loop_conv_unroller_busy ||
+      loop_matmul_unroller_busy || reservation_station.io.busy ||
+      spad.module.io.busy || unrolled_cmd.valid || loop_cmd.valid ||
+      conv_cmd.valid || potalResponsePending || streamResponsePending ||
+      !epochs.io.drained || io.resp.valid || h.io.finiteBusy
+  }
+
  
   io.interrupt := tlb.io.exp.map(_.interrupt).reduce(_ || _)
 
@@ -1061,6 +1133,39 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   potalIngressOpt match {
     case Some(ingress) =>
 
+      if (p(PoTalIndexRegisterControllerKey)) {
+        val h = indexRegisterOpt.get
+        val responseArb = Module(new RRArbiter(new RoCCResponse, 5))
+        val copied = RegInit(false.B)
+        val adapterTag = RegInit(false.B)
+        responseArb.io.in(0) <> counters.io.out
+        responseArb.io.in(1).valid := h.io.cpuResp.valid
+        responseArb.io.in(1).bits.rd := h.io.cpuResp.bits.rd
+        responseArb.io.in(1).bits.data := h.io.cpuResp.bits.status
+        h.io.cpuResp.ready := responseArb.io.in(1).ready
+        responseArb.io.in(2).valid := loop_response.valid
+        responseArb.io.in(2).bits.rd := loop_response.bits.rd
+        responseArb.io.in(2).bits.data := loop_response.bits.status
+        loop_response.ready := responseArb.io.in(2).ready
+        responseArb.io.in(3).valid := streamResponsePending
+        responseArb.io.in(3).bits.rd := streamResponse.rd
+        responseArb.io.in(3).bits.data := streamResponse.status
+        when(responseArb.io.in(3).fire) { streamResponsePending := false.B }
+        responseArb.io.in(4).valid := h.io.resp.valid && !copied
+        responseArb.io.in(4).bits := h.io.resp.bits
+        h.io.resp.ready := io.resp.fire && adapterTag
+        when(responseArb.io.out.fire) { adapterTag := responseArb.io.chosen === 4.U }
+        when(responseArb.io.in(4).fire) { copied := true.B }
+        when(h.io.resp.fire) { copied := false.B }
+        when(copied) {
+          assert(h.io.resp.valid)
+          assert(io.resp.valid && adapterTag)
+          assert(io.resp.bits.asUInt === h.io.resp.bits.asUInt)
+        }
+        h.io.olderResponsesEmpty := !counters.io.out.valid && !loop_response.valid &&
+          !streamResponsePending && !io.resp.valid && !copied
+        arbitratedResponse <> responseArb.io.out
+      } else {
       val responseArb =
         Module(new RRArbiter(new RoCCResponse, 4))
 
@@ -1088,6 +1193,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
       when(responseArb.io.in(3).fire) { streamResponsePending := false.B }
 
       arbitratedResponse <> responseArb.io.out
+      }
 
     case None =>
       val responseArb = Module(new RRArbiter(new RoCCResponse, 2))

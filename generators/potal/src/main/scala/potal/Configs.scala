@@ -22,6 +22,10 @@ case object PoTalPrefetchObservationEnabled extends Field[Boolean](false)
 
 case object PoTalEarlyPrefetchEnabled extends Field[Boolean](false)
 
+case object PoTalIndexMetadataTransportKey extends Field[Boolean](false)
+
+case object PoTalIndexRegisterControllerKey extends Field[Boolean](false)
+
 // Separate from both resident-view and physical-observation capabilities.
 object PoTalLdbOnlyCapability {
   val Query = BigInt("504f4c4400000000", 16)

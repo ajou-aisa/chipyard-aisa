@@ -79,21 +79,21 @@ class DecoupledTLB(entries: Int, maxSize: Int, use_firesim_simulation_counters: 
   }
 }
 
-class FrontendTLBIO(implicit p: Parameters) extends CoreBundle {
-  val lgMaxSize = log2Ceil(coreDataBytes)
+class FrontendTLBIO(requestLgMaxSize: Option[Int] = None)(implicit p: Parameters) extends CoreBundle {
+  val lgMaxSize = requestLgMaxSize.getOrElse(log2Ceil(coreDataBytes))
   // val req = Decoupled(new TLBReq(lgMaxSize))
   val req = Valid(new DecoupledTLBReq(lgMaxSize))
   val resp = Flipped(new TLBResp)
 }
 
-class FrontendTLB(nClients: Int, entries: Int, maxSize: Int, use_tlb_register_filter: Boolean, use_firesim_simulation_counters: Boolean, use_shared_tlb: Boolean)
+class FrontendTLB(nClients: Int, entries: Int, maxSize: Int, use_tlb_register_filter: Boolean, use_firesim_simulation_counters: Boolean, use_shared_tlb: Boolean, requestLgMaxSize: Option[Int] = None)
                  (implicit edge: TLEdgeOut, p: Parameters) extends CoreModule {
 
   val num_tlbs = if (use_shared_tlb) 1 else nClients
-  val lgMaxSize = log2Ceil(coreDataBytes)
+  val lgMaxSize = requestLgMaxSize.getOrElse(log2Ceil(coreDataBytes))
 
   val io = IO(new Bundle {
-    val clients = Flipped(Vec(nClients, new FrontendTLBIO))
+    val clients = Flipped(Vec(nClients, new FrontendTLBIO(requestLgMaxSize)))
     val ptw = Vec(num_tlbs, new TLBPTWIO)
     val exp = Vec(num_tlbs, new TLBExceptionIO)
     val counter = new CounterEventIO()
