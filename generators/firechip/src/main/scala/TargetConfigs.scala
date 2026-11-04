@@ -429,3 +429,10 @@ class FireSimLeanGemminiRocketMMIOOnlyConfig extends Config(
   new chipyard.LeanGemminiRocketConfig)
 
 
+class FireSimFiveRocketSinglePoTalD32PairedStreamingIndexQueueConfig extends Config(
+  new Config((site, here, up) => {
+    case potal.PoTalIndexRegisterControllerKey => true
+  }) ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new FireSimQuadRocketSinglePoTalD32PairedStreamingConfig
+)
